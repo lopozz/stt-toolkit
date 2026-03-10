@@ -6,7 +6,10 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "aiohttp>=3.13.3",
+    "datasets>=4.7.0",
+    "openai>=2.26.0",
     "ruff>=0.15.5",
     "silero-vad>=6.2.1",
     "soundfile>=0.13.1",
+    "torchcodec>=0.10.0",
 ]

@@ -9,7 +9,7 @@ source .venv/bin/activate
 uv pip install -e .
 ```
 
-Build the docker image:
+Build the vllm docker image with audio features enabled:
 ```
 docker compose build
 ```
