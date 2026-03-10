@@ -1,0 +1,12 @@
+[project]
+name = "stt-toolkit"
+version = "0.1.0"
+description = "Handy scripts to evaluate STT models"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "aiohttp>=3.13.3",
+    "ruff>=0.15.5",
+    "silero-vad>=6.2.1",
+    "soundfile>=0.13.1",
+]
