@@ -14,10 +14,10 @@ docker run -d \
   -p "${PORT}:8000" \
   -v "${HOME}/.cache/huggingface:/root/.cache/huggingface" \
   "${IMAGE}" \
-  --model "${MODEL}" \
-  --task transcription \
+  "${MODEL}" \
   --host 0.0.0.0 \
   --port 8000 \
-  --gpu-memory-utilization 0.85 \
-  --max-model-len 128 \
-  --max-num-seqs 2
+  --gpu-memory-utilization 0.95 \
+  --max-model-len 8192 \
+  --max-num-seqs 1
+  
