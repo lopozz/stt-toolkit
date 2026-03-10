@@ -1,0 +1,7 @@
+model: openai/whisper-large-v3-turbo
+port: 8000
+container_name: vllm-audio-server-whisper
+gpu_memory_utilization: 0.95
+max_model_len: 448
+max_num_batched_tokens: 2048
+max_num_seqs: 1
