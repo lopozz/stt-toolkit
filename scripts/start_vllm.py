@@ -28,6 +28,7 @@ def main():
     max_model_len = str(cfg.get("max_model_len", 448))
     max_num_seqs = str(cfg.get("max_num_seqs", 1))
     max_num_batched_tokens = cfg.get("max_num_batched_tokens")
+    max_tokens_per_mm_item = cfg.get("max_num_batched_tokens")
 
     subprocess.run(
         ["docker", "rm", "-f", container_name],
@@ -65,6 +66,8 @@ def main():
 
     if max_num_batched_tokens is not None:
         cmd.extend(["--max-num-batched-tokens", str(max_num_batched_tokens)])
+    if max_tokens_per_mm_item is not None:
+        cmd.extend(["--max-tokens-per-mm-item", str(max_tokens_per_mm_item)])
 
     print("Running:")
     print(" ".join(cmd))
