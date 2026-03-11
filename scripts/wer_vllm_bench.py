@@ -1,19 +1,20 @@
-import argparse
-import io
+# TODO use hierarchical yaml file and store vllm config in metadata (hydra)
+# TODO write a proper try except finally
+
 import os
-import re
 import sys
 import time
 import json
 import yaml
-import subprocess
-from datetime import datetime, timezone
-
 import httpx
-import numpy as np
-import soundfile as sf
+import argparse
+import subprocess
+
 from openai import OpenAI
 from datasets import load_dataset
+from utils import waveform_to_in_memory_wav, safe_filename
+from datetime import datetime, timezone
+
 from jiwer import (
     wer,
     Compose,
@@ -67,28 +68,10 @@ def model_is_ready(base_url, model):
         return False
 
 
-def safe_filename(text):
-    text = text.split("/")[-1]
-    text = re.sub(r"[^A-Za-z0-9_.-]+", "_", text)
-    return text.strip("_")
-
-
-def waveform_to_in_memory_wav(waveform, sr, name="audio.wav"):
-    """
-    Writes a waveform array into an in-memory WAV file, making possible
-    to send it to an API without saving anything to disk.
-    """
-    buffer = io.BytesIO()
-    sf.write(buffer, np.asarray(waveform, dtype=np.float32), sr, format="WAV")
-    buffer.name = name
-    buffer.seek(0)
-    return buffer
-
-
 def main():
     args = parse_args()
-
-    os.makedirs(args.output_dir, exist_ok=True)
+    output_dir = os.path.join(args.output_dir, "wer_bench")
+    os.makedirs(output_dir, exist_ok=True)
 
     print(f"Loading dataset: {args.dataset} [{args.split}]")
     ds = load_dataset(args.dataset, split=args.split)
@@ -105,19 +88,19 @@ def main():
     started_here = False
 
     for config_path in args.configs:
+        with open(config_path, "r", encoding="utf-8") as f:
+            model = yaml.safe_load(f)["model"]
+
         results = {
             "metadata": {
                 "created_at": datetime.now(timezone.utc).isoformat(),
-                "dataset": args.dataset,
-                "split": args.split,
+                "model": model,
+                "dataset": f"{args.dataset}[{args.split}]",
             },
             "results": {"wer": None, "samples": []},
         }
 
         try:
-            with open(config_path, "r", encoding="utf-8") as f:
-                model = yaml.safe_load(f)["model"]
-
             if not model_is_ready(args.base_url, model):
                 print("Model not ready, starting vLLM server...")
 
@@ -212,9 +195,7 @@ def main():
 
             dataset_name = safe_filename(args.dataset)
             model_name = safe_filename(model)
-            output_path = os.path.join(
-                args.output_dir, f"{dataset_name}--{model_name}.json"
-            )
+            output_path = os.path.join(output_dir, f"{dataset_name}--{model_name}.json")
 
             with open(output_path, "w", encoding="utf-8") as f:
                 json.dump(results, f, ensure_ascii=False, indent=2)
