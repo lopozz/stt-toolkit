@@ -110,7 +110,7 @@ def main():
             subprocess.run(
                 [
                     sys.executable,
-                    "scripts/start_vllm.py",
+                    os.path.join("scripts", "start_vllm.py"),
                     config_path,
                 ],
                 check=True,
@@ -185,7 +185,7 @@ def main():
         print("=" * 100)
 
         subprocess.run(
-            [sys.executable, "scripts/stop_vllm.py", config_path],
+            [sys.executable, os.path.join("scripts", "stop_vllm.py"), config_path],
             check=False,
             capture_output=True,
             text=True,
