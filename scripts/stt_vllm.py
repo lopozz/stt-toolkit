@@ -2,10 +2,10 @@ import argparse
 import asyncio
 import json
 from pathlib import Path
-from typing import Any
 
 from openai import AsyncOpenAI
 from openai.types.audio.transcription import Transcription
+from openai.types.audio.transcription_verbose import TranscriptionVerbose
 from openai.types.audio.translation import Translation
 
 
@@ -76,7 +76,7 @@ async def transcribe_audio_file(
     src_lang: str | None = None,
     tgt_lang: str | None = None,
     response_format: str = "json",
-) -> Transcription | Translation:
+) -> str | Transcription | Translation | TranscriptionVerbose:
     with audio_path.open("rb") as f:
         audio_bytes = f.read()
 
@@ -101,21 +101,26 @@ async def transcribe_audio_file(
     return response
 
 
-def serialize_response(response: Any, response_format: str) -> str:
-    print(response)
+def serialize_response(
+    response: str | Transcription | Translation | TranscriptionVerbose,
+    response_format: str,
+) -> str:
     if hasattr(response, "model_dump"):
         payload = response.model_dump(mode="json", warnings=False)
         if isinstance(payload.get("duration"), str):
             payload["duration"] = float(payload["duration"])
+        if response_format in {"json"}:
+            payload = {
+                "text": payload["text"]
+            }  # Transcription and Translation had different formats
         if response_format in {"json", "verbose_json"}:
             return json.dumps(payload, ensure_ascii=False, indent=2)
         if "text" in payload and isinstance(payload["text"], str):
             return payload["text"]
         return json.dumps(payload, ensure_ascii=False, indent=2)
 
-    if response_format in {"json", "verbose_json"}:
-        return json.dumps(response, ensure_ascii=False, indent=2)
-    return str(response)
+    else:
+        return json.loads(response)["text"]
 
 
 async def main():
