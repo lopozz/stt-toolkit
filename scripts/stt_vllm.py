@@ -1,12 +1,12 @@
-import argparse
-import asyncio
 import json
-from pathlib import Path
+import asyncio
+import argparse
 
+from pathlib import Path
 from openai import AsyncOpenAI
+from openai.types.audio.translation import Translation
 from openai.types.audio.transcription import Transcription
 from openai.types.audio.transcription_verbose import TranscriptionVerbose
-from openai.types.audio.translation import Translation
 
 
 LOCAL_AUDIO_DIR = "./data/network_1976"
@@ -14,10 +14,10 @@ LOCAL_AUDIO_DIR = "./data/network_1976"
 OUTPUT_SUFFIX_BY_FORMAT = {
     "json": ".json",
     "text": ".txt",
-    "srt": ".srt",
     "verbose_json": ".json",
-    "vtt": ".vtt",
 }
+
+SUPPORTED_MODELS_FOR_VERBOSE_JSON = "openai/whisper-large-v3-turbo"
 
 
 def parse_args():
@@ -125,6 +125,16 @@ def serialize_response(
 
 async def main():
     args = parse_args()
+
+    if (
+        args.response_format == "verbose_json"
+        and args.model not in SUPPORTED_MODELS_FOR_VERBOSE_JSON
+    ):
+        print(
+            f"[warn] verbose_json is not available for {args.model}; "
+            "defaulting to json."
+        )
+        args.response_format = "json"
 
     if (
         args.tgt_lang is not None
