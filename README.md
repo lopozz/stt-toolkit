@@ -1,5 +1,5 @@
 # 💬 stt-toolkit
-Handy scripts to evaluate STT models.
+Handy scripts to run and evaluate STT models.
 
 ## 🛠 Installation & Setup
 Install the Python Library
