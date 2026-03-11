@@ -1,10 +1,23 @@
 import argparse
 import asyncio
+import json
 from pathlib import Path
+from typing import Any
 
 from openai import AsyncOpenAI
+from openai.types.audio.transcription import Transcription
+from openai.types.audio.translation import Translation
+
 
 LOCAL_AUDIO_DIR = "./data/network_1976"
+
+OUTPUT_SUFFIX_BY_FORMAT = {
+    "json": ".json",
+    "text": ".txt",
+    "srt": ".srt",
+    "verbose_json": ".json",
+    "vtt": ".vtt",
+}
 
 
 def parse_args():
@@ -32,6 +45,12 @@ def parse_args():
         help="Desired output language. If omitted or equal to source, plain transcription is used.",
     )
     parser.add_argument(
+        "--response-format",
+        choices=["json", "text", "verbose_json"],
+        default="json",
+        help="Response format",
+    )
+    parser.add_argument(
         "--input-dir",
         default=LOCAL_AUDIO_DIR,
         help="Directory containing WAV files",
@@ -56,7 +75,8 @@ async def transcribe_audio_file(
     audio_path: Path,
     src_lang: str | None = None,
     tgt_lang: str | None = None,
-) -> str:
+    response_format: str = "json",
+) -> Transcription | Translation:
     with audio_path.open("rb") as f:
         audio_bytes = f.read()
 
@@ -66,22 +86,51 @@ async def transcribe_audio_file(
             model=model,
             file=file_obj,
             language=src_lang,
+            response_format=response_format,
         )
     else:
         response = await client.audio.translations.create(
             model=model,
             file=file_obj,
+            response_format=response_format,
             extra_body=dict(
                 language=src_lang,
                 to_language=tgt_lang,
             ),
         )
+    return response
 
-    return response.text
+
+def serialize_response(response: Any, response_format: str) -> str:
+    print(response)
+    if hasattr(response, "model_dump"):
+        payload = response.model_dump(mode="json", warnings=False)
+        if isinstance(payload.get("duration"), str):
+            payload["duration"] = float(payload["duration"])
+        if response_format in {"json", "verbose_json"}:
+            return json.dumps(payload, ensure_ascii=False, indent=2)
+        if "text" in payload and isinstance(payload["text"], str):
+            return payload["text"]
+        return json.dumps(payload, ensure_ascii=False, indent=2)
+
+    if response_format in {"json", "verbose_json"}:
+        return json.dumps(response, ensure_ascii=False, indent=2)
+    return str(response)
 
 
 async def main():
     args = parse_args()
+
+    if (
+        args.tgt_lang is not None
+        and args.tgt_lang != args.src_lang
+        and args.response_format == "verbose_json"
+    ):
+        print(
+            "[warn] verbose_json is not available for translation endpoint; "
+            "defaulting to json."
+        )
+        args.response_format = "json"
 
     input_dir = Path(args.input_dir)
     if not input_dir.is_dir():
@@ -101,18 +150,21 @@ async def main():
     async def worker(src: Path):
         async with sem:
             rel = src.relative_to(input_dir)
-            dst = output_dir / rel.with_suffix(".txt")
+            suffix = OUTPUT_SUFFIX_BY_FORMAT[args.response_format]
+            dst = output_dir / rel.with_suffix(suffix)
             dst.parent.mkdir(parents=True, exist_ok=True)
 
             try:
-                text = await transcribe_audio_file(
+                response = await transcribe_audio_file(
                     client,
                     args.model,
                     src,
                     src_lang=args.src_lang,
                     tgt_lang=args.tgt_lang,
+                    response_format=args.response_format,
                 )
-                dst.write_text(text, encoding="utf-8")
+                output_content = serialize_response(response, args.response_format)
+                dst.write_text(output_content, encoding="utf-8")
                 print(f"[ok] {rel} -> {dst.relative_to(output_dir)}")
                 return True
             except Exception as exc:
