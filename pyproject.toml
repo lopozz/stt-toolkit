@@ -12,5 +12,6 @@ dependencies = [
     "ruff>=0.15.5",
     "silero-vad>=6.2.1",
     "soundfile>=0.13.1",
+    "streamlit>=1.49.0",
     "torchcodec>=0.10.0",
 ]
