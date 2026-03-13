@@ -1,2 +1,2 @@
 FROM vllm/vllm-openai:latest
-RUN pip install "vllm[audio]"
+RUN pip install --no-cache-dir "vllm[audio]" "mistral-common[audio]"

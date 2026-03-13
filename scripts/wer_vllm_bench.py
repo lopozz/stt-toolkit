@@ -1,5 +1,4 @@
 # TODO use hierarchical yaml file and store vllm config in metadata (hydra)
-# TODO write a proper try except finally
 
 import os
 import sys
@@ -88,6 +87,10 @@ def main():
     started_here = False
 
     for config_path in args.configs:
+        if not os.path.exists(config_path):
+            print(f"Skipping: {config_path} (File not found)")
+            continue
+
         with open(config_path, "r", encoding="utf-8") as f:
             model = yaml.safe_load(f)["model"]
 
@@ -104,8 +107,6 @@ def main():
             if not model_is_ready(args.base_url, model):
                 print("Model not ready, starting vLLM server...")
 
-                started_here = True
-
                 subprocess.run(
                     [
                         sys.executable,
@@ -114,6 +115,8 @@ def main():
                     ],
                     check=True,
                 )
+
+                started_here = True
 
                 for _ in range(60 // 2):
                     if model_is_ready(args.base_url, model):
@@ -178,6 +181,9 @@ def main():
             print(f"Model       : {model}")
             print(f"Overall WER : {overall_wer:.4f}")
             print("=" * 100)
+
+        except Exception as e:
+            print(f"Failed to process {config_path}: {type(e).__name__} - {e}")
 
         finally:
             if started_here:
