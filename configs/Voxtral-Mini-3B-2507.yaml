@@ -1,0 +1,6 @@
+model: mistralai/Voxtral-Mini-3B-2507
+port: 8000
+container_name: vllm-audio-server-voxtral
+gpu_memory_utilization: 0.95
+max_model_len: 100
+max_num_seqs: 1
