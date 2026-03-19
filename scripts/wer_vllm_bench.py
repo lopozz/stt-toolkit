@@ -84,15 +84,16 @@ def main():
             ReduceToListOfListOfWords(),
         ]
     )
-    started_here = False
-
     for config_path in args.configs:
+        started_here = False
         if not os.path.exists(config_path):
             print(f"Skipping: {config_path} (File not found)")
             continue
 
         with open(config_path, "r", encoding="utf-8") as f:
-            model = yaml.safe_load(f)["model"]
+            cfg = yaml.safe_load(f)
+
+        model = cfg["model"]
 
         results = {
             "metadata": {
