@@ -113,7 +113,6 @@ def compute_metrics(
     rps = len(latencies) / wall_time_s if wall_time_s > 0 else 0.0
 
     total_audio_s = recording_length_s * len(latencies)
-    print(wall_time_s)
     rtf = total_audio_s / wall_time_s if wall_time_s > 0 else 0.0
 
     return {
