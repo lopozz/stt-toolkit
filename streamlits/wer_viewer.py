@@ -1,3 +1,5 @@
+# TODO adapt to speed analysis in wer script
+
 import difflib
 import html
 import json
