@@ -1,5 +1,3 @@
-# TODO use hierarchical yaml file and store vllm config in metadata (hydra)
-
 import os
 import sys
 import time
@@ -8,6 +6,7 @@ import yaml
 import httpx
 import argparse
 import subprocess
+import numpy as np
 
 from openai import OpenAI
 from datasets import load_dataset
@@ -53,6 +52,13 @@ def parse_args():
         default="results",
         help="Directory where JSON results will be saved",
     )
+    parser.add_argument(
+        "--speeds",
+        nargs="+",
+        type=float,
+        default=[1.0],
+        help="Audio speed factors to evaluate, e.g. --speeds 1.0 2.0",
+    )
 
     return parser.parse_args()
 
@@ -65,6 +71,19 @@ def model_is_ready(base_url, model):
         return model in models
     except Exception:
         return False
+
+
+def change_audio_speed(waveform, speed):
+    if speed <= 0:
+        raise ValueError(f"Invalid speed: {speed}")
+    if speed == 1.0:
+        return np.asarray(waveform, dtype=np.float32)
+
+    waveform = np.asarray(waveform, dtype=np.float32)
+    new_length = max(1, int(len(waveform) / speed))
+    src_positions = np.arange(len(waveform), dtype=np.float32)
+    dst_positions = np.linspace(0, len(waveform) - 1, new_length, dtype=np.float32)
+    return np.interp(dst_positions, src_positions, waveform).astype(np.float32)
 
 
 def main():
@@ -100,8 +119,9 @@ def main():
                 "created_at": datetime.now(timezone.utc).isoformat(),
                 "model": model,
                 "dataset": f"{args.dataset}[{args.split}]",
+                "speeds": args.speeds,
             },
-            "results": {"wer": None, "samples": []},
+            "results": {},
         }
 
         try:
@@ -134,54 +154,62 @@ def main():
                 api_key="EMPTY",
             )
 
-            refs, preds = [], []
+            for speed in args.speeds:
+                refs, preds = [], []
+                speed_key = f"{speed:g}x"
+                results["results"][speed_key] = {"wer": None, "samples": []}
 
-            for i, example in enumerate(ds):
-                ref_text = example["text"].replace("\n", " ").strip()
-                audio = example["audio"]
+                print(f"\nEvaluating speed {speed_key}...")
 
-                buffer = waveform_to_in_memory_wav(
-                    audio["array"], audio["sampling_rate"]
+                for i, example in enumerate(ds):
+                    ref_text = example["text"].replace("\n", " ").strip()
+                    audio = example["audio"]
+                    sped_up_audio = change_audio_speed(audio["array"], speed)
+
+                    buffer = waveform_to_in_memory_wav(
+                        sped_up_audio, audio["sampling_rate"]
+                    )
+                    response = client.audio.transcriptions.create(
+                        model=model,
+                        file=buffer,
+                    )
+                    pred_text = response.text.strip()
+
+                    sample_wer = wer(
+                        ref_text,
+                        pred_text,
+                        reference_transform=norm,
+                        hypothesis_transform=norm,
+                    )
+
+                    refs.append(ref_text)
+                    preds.append(pred_text)
+
+                    sample_result = {
+                        "source": example.get("source", f"sample_{i}"),
+                        "wer": sample_wer,
+                        "pred": pred_text,
+                    }
+                    results["results"][speed_key]["samples"].append(sample_result)
+
+                    print(
+                        f"[{i + 1}/{len(ds)}] {sample_result['source']}  "
+                        f"speed={speed_key}  WER={sample_wer:.3f}"
+                    )
+
+                overall_wer = wer(
+                    refs, preds, reference_transform=norm, hypothesis_transform=norm
                 )
-                response = client.audio.transcriptions.create(
-                    model=model,
-                    file=buffer,
-                )
-                pred_text = response.text.strip()
+                results["results"][speed_key]["wer"] = overall_wer
 
-                sample_wer = wer(
-                    ref_text,
-                    pred_text,
-                    reference_transform=norm,
-                    hypothesis_transform=norm,
-                )
-
-                refs.append(ref_text)
-                preds.append(pred_text)
-
-                sample_result = {
-                    "source": example.get("source", f"sample_{i}"),
-                    "wer": sample_wer,
-                    "pred": pred_text,
-                }
-                results["results"]["samples"].append(sample_result)
-
-                print(
-                    f"[{i + 1}/{len(ds)}] {sample_result['source']}  WER={sample_wer:.3f}"
-                )
-
-            overall_wer = wer(
-                refs, preds, reference_transform=norm, hypothesis_transform=norm
-            )
-            results["results"]["wer"] = overall_wer
-
-            print("\n" + "=" * 100)
-            print("RESULTS")
-            print("=" * 100)
-            print(f"Dataset     : {args.dataset} [{args.split}]")
-            print(f"Model       : {model}")
-            print(f"Overall WER : {overall_wer:.4f}")
-            print("=" * 100)
+                print("\n" + "=" * 100)
+                print("RESULTS")
+                print("=" * 100)
+                print(f"Dataset     : {args.dataset} [{args.split}]")
+                print(f"Model       : {model}")
+                print(f"Speed       : {speed_key}")
+                print(f"Overall WER : {overall_wer:.4f}")
+                print("=" * 100)
 
         except Exception as e:
             print(f"Failed to process {config_path}: {type(e).__name__} - {e}")

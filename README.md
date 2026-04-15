@@ -14,6 +14,7 @@ Build the vllm docker image with audio features enabled:
 docker compose build
 ```
 
+## 🐳 Usage
 Add your audio data to `data` and serve a model with vLLM:
 
 ```

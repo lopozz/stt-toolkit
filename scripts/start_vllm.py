@@ -36,7 +36,7 @@ def main():
 
     model = cfg.get("model", "Qwen/Qwen3-ASR-1.7B")
     port = str(cfg.get("port", 8000))
-    image = cfg.get("image", "vllm-openai-audio:latest")
+    image = cfg.get("image", "vllm-openai-audio:v0.17.1")
     container_name = cfg.get("container_name", "vllm-audio-server")
     gpu_memory_utilization = str(cfg.get("gpu_memory_utilization", 0.95))
     max_model_len = str(cfg.get("max_model_len", 448))

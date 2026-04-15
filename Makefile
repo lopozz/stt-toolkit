@@ -1,4 +1,4 @@
-.PHONY: quality style pip-solve tests
+.PHONY: quality style
 
 quality:
 	ruff check .

@@ -5,4 +5,4 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: vllm-openai-audio:latest
+    image: vllm-openai-audio:v0.17.1

@@ -1,2 +1,2 @@
-FROM vllm/vllm-openai:latest
+FROM vllm/vllm-openai:v0.17.1
 RUN pip install --no-cache-dir "vllm[audio]" "mistral-common[audio]"
