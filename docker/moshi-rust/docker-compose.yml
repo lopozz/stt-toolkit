@@ -1,0 +1,23 @@
+services:
+  moshi-rust:
+    image: moshi-rust:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        CUDA_COMPUTE_CAP: "89"
+    ports:
+      - "8998:8998"
+    restart: unless-stopped
+    volumes:
+      - hf-cache:/root/.cache/huggingface
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              capabilities: [gpu]
+              count: all
+
+volumes:
+  hf-cache:
