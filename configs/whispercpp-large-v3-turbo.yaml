@@ -1,0 +1,6 @@
+backend: whispercpp
+model: whisper.cpp/large-v3-turbo
+whispercpp_model_path: whisper.cpp/models/ggml-large-v3-turbo.bin
+whispercpp_executable: whisper.cpp/build/bin/whisper-cli
+language: it
+threads: 8

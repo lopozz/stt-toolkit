@@ -13,8 +13,8 @@ from jiwer import (
 )
 
 from stt_toolkit.cache import ResultCache
-from stt_toolkit.backends.vllm import VllmBackend
 from stt_toolkit.utils import waveform_to_in_memory_wav
+from stt_toolkit.backends import STTBackend, VllmBackend, WhisperCppBackend
 
 
 def change_audio_speed(waveform, speed: float):
@@ -34,12 +34,13 @@ def evaluate_wer(
     model: str,
     tasks: list[dict],
     cache: ResultCache,
-    backend: VllmBackend,
+    backend: STTBackend,
     speeds: list[float] | None = None,
     overwrite: bool = False,
 ):
-    assert isinstance(backend, VllmBackend), (
-        f"Only VllmBackend is supported for now, {backend} was given."
+    assert isinstance(backend, (VllmBackend, WhisperCppBackend)), (
+        f"Only VllmBackend and WhisperCppBackend are supported for now, "
+        f"{backend} was given."
     )
 
     speeds = speeds or [1.0]
