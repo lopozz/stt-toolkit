@@ -50,6 +50,11 @@ def parse_args():
         default="results",
         help="Directory where JSON result files are saved",
     )
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Rerun benchmarks even when a cached result already exists",
+    )
     return parser.parse_args()
 
 
@@ -62,6 +67,7 @@ async def main():
         concurrency_values=args.concurrency,
         audio_file=args.audio_file,
         output_dir=args.output_dir,
+        overwrite=args.overwrite,
     )
 
 

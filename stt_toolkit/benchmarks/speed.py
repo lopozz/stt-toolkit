@@ -1,12 +1,13 @@
-import asyncio
-import json
-import os
 import time
 import wave
-from datetime import datetime, timezone
+import asyncio
+
 from pathlib import Path
+from datetime import datetime, timezone
+
 
 from stt_toolkit.backends.vllm import VllmBackend
+from stt_toolkit.cache import SpeedResultCache
 
 
 async def single_request(
@@ -55,6 +56,7 @@ async def run_benchmark(
 def compute_metrics(
     results: list[dict],
     model: str,
+    audio_file: str,
     recording_length_s: float,
     total_requests: int,
     concurrency: int,
@@ -72,9 +74,11 @@ def compute_metrics(
         "metadata": {
             "created_at": datetime.now(timezone.utc).isoformat(),
             "model": model,
+            "audio_file": audio_file,
             "audio_length_s": round(recording_length_s, 3),
             "requests": total_requests,
             "concurrency": concurrency,
+            "benchmark": "batched_transcription_bench",
         },
         "results": {
             "avg_latency_s": round(mean_latency, 4),
@@ -92,7 +96,9 @@ async def run_speed_benchmark(
     concurrency_values: list[int],
     audio_file: str,
     output_dir: str,
+    overwrite: bool = False,
 ) -> None:
+    cache = SpeedResultCache(output_dir)
     audio_path = Path(audio_file)
     if not audio_path.exists():
         raise FileNotFoundError(f"Audio file not found: {audio_path}")
@@ -113,6 +119,26 @@ async def run_speed_benchmark(
 
     for requests in request_counts:
         for concurrency in concurrency_values:
+            if (
+                cache.has_result(
+                    model=model,
+                    audio_file=str(audio_path),
+                    requests=requests,
+                    concurrency=concurrency,
+                    audio_length_s=recording_length_s,
+                )
+                and not overwrite
+            ):
+                print(
+                    f"Skipping cached result: model={model}, "
+                    f"requests={requests}, concurrency={concurrency}"
+                )
+                print(
+                    "Cached file: "
+                    f"{cache.result_path(model, str(audio_path), requests, concurrency, recording_length_s)}"
+                )
+                continue
+
             print(
                 f"\nRunning benchmark: "
                 f"model={model}, requests={requests}, concurrency={concurrency}"
@@ -129,6 +155,7 @@ async def run_speed_benchmark(
             metrics = compute_metrics(
                 results,
                 model=model,
+                audio_file=str(audio_path),
                 recording_length_s=recording_length_s,
                 total_requests=requests,
                 concurrency=concurrency,
@@ -139,15 +166,6 @@ async def run_speed_benchmark(
             for key, value in metrics.items():
                 print(f"  {key}: {value}")
 
-            safe_model_name = model.replace("/", "_").replace(":", "_")
-            run_output_dir = os.path.join(output_dir, "batched_transcription_bench")
-            os.makedirs(run_output_dir, exist_ok=True)
-            output_path = os.path.join(
-                run_output_dir,
-                f"{safe_model_name}_{requests}reqs_{concurrency}concs_{recording_length_s:.0f}s.json",
-            )
-
-            with open(output_path, "w") as f:
-                json.dump(metrics, f, indent=2)
+            output_path = cache.save_result(metrics)
 
             print(f"\nResults saved to {output_path}")
