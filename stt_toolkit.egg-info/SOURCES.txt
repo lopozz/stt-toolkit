@@ -1,0 +1,10 @@
+LICENSE
+README.md
+pyproject.toml
+stt_toolkit/__init__.py
+stt_toolkit/config.py
+stt_toolkit.egg-info/PKG-INFO
+stt_toolkit.egg-info/SOURCES.txt
+stt_toolkit.egg-info/dependency_links.txt
+stt_toolkit.egg-info/requires.txt
+stt_toolkit.egg-info/top_level.txt

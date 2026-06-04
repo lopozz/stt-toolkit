@@ -1,6 +1,11 @@
 import argparse
+import os
+import shlex
 import subprocess
+
 import yaml
+
+from stt_toolkit.config import Config
 
 
 def append_cli_arg(cmd, flag, value):
@@ -21,8 +26,6 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "config",
-        nargs="?",
-        default="configs/qwen3-asr.yaml",
         help="Path to YAML config",
     )
     return parser.parse_args()
@@ -32,77 +35,82 @@ def main():
     args = parse_args()
 
     with open(args.config) as f:
-        cfg = yaml.safe_load(f) or {}
-
-    model = cfg.get("model", "Qwen/Qwen3-ASR-1.7B")
-    port = str(cfg.get("port", 8000))
-    image = cfg.get("image", "vllm-openai-audio:v0.17.1")
-    container_name = cfg.get("container_name", "vllm-audio-server")
-    gpu_memory_utilization = str(cfg.get("gpu_memory_utilization", 0.95))
-    max_model_len = str(cfg.get("max_model_len", 448))
-    max_num_seqs = str(cfg.get("max_num_seqs", 1))
-    max_num_batched_tokens = cfg.get("max_num_batched_tokens")
-    max_tokens_per_mm_item = cfg.get("max_tokens_per_mm_item")
+        cfg = Config.model_validate(yaml.safe_load(f) or {})
 
     subprocess.run(
-        ["docker", "rm", "-f", container_name],
+        ["docker", "rm", "-f", cfg.container_name],
         check=False,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
 
-    cmd = [
+    docker_cmd = [
         "docker",
         "run",
         "-d",
         "--name",
-        container_name,
+        cfg.container_name,
         "--gpus",
         "all",
         "--ipc=host",
         "-p",
-        f"{port}:8000",
+        f"{cfg.port}:8000",
         "-v",
-        f"{subprocess.os.path.expanduser('~')}/.cache/huggingface:/root/.cache/huggingface",
-        image,
-        model,
+        f"{os.path.expanduser('~')}/.cache/huggingface:/root/.cache/huggingface",
+    ]
+
+    vllm_args = [
+        cfg.model,
         "--host",
         "0.0.0.0",
         "--port",
         "8000",
         "--gpu-memory-utilization",
-        gpu_memory_utilization,
+        str(cfg.gpu_memory_utilization),
         "--max-model-len",
-        max_model_len,
+        str(cfg.max_model_len),
         "--max-num-seqs",
-        max_num_seqs,
+        str(cfg.max_num_seqs),
     ]
 
-    if max_num_batched_tokens is not None:
-        cmd.extend(["--max-num-batched-tokens", str(max_num_batched_tokens)])
-    if max_tokens_per_mm_item is not None:
-        cmd.extend(["--max-tokens-per-mm-item", str(max_tokens_per_mm_item)])
+    if cfg.max_num_batched_tokens is not None:
+        vllm_args.extend(["--max-num-batched-tokens", str(cfg.max_num_batched_tokens)])
+    if cfg.max_tokens_per_mm_item is not None:
+        vllm_args.extend(["--max-tokens-per-mm-item", str(cfg.max_tokens_per_mm_item)])
 
     optional_vllm_args = {
-        "--quantization": cfg.get("quantization"),
-        "--load-format": cfg.get("load_format"),
-        "--dtype": cfg.get("dtype"),
-        "--kv-cache-dtype": cfg.get("kv_cache_dtype"),
-        "--tensor-parallel-size": cfg.get("tensor_parallel_size"),
-        "--pipeline-parallel-size": cfg.get("pipeline_parallel_size"),
-        "--max-num-partial-prefills": cfg.get("max_num_partial_prefills"),
-        "--limit-mm-per-prompt": cfg.get("limit_mm_per_prompt"),
-        "--trust-remote-code": cfg.get("trust_remote_code"),
-        "--enforce-eager": cfg.get("enforce_eager"),
+        "--quantization": cfg.quantization,
+        "--load-format": cfg.load_format,
+        "--dtype": cfg.dtype,
+        "--kv-cache-dtype": cfg.kv_cache_dtype,
+        "--tensor-parallel-size": cfg.tensor_parallel_size,
+        "--pipeline-parallel-size": cfg.pipeline_parallel_size,
+        "--max-num-partial-prefills": cfg.max_num_partial_prefills,
+        "--limit-mm-per-prompt": cfg.limit_mm_per_prompt,
+        "--trust-remote-code": cfg.trust_remote_code,
+        "--enforce-eager": cfg.enforce_eager,
     }
     for flag, value in optional_vllm_args.items():
-        append_cli_arg(cmd, flag, value)
+        append_cli_arg(vllm_args, flag, value)
 
-    for extra_arg in cfg.get("extra_vllm_args", []):
-        cmd.append(str(extra_arg))
+    for extra_arg in cfg.extra_vllm_args:
+        vllm_args.append(str(extra_arg))
+
+    if cfg.extra_deps:
+        install_cmd = shlex.join(["pip", "install", "--no-cache-dir", *cfg.extra_deps])
+        serve_cmd = shlex.join(["vllm", "serve", *vllm_args])
+        cmd = docker_cmd + [
+            "--entrypoint",
+            "bash",
+            cfg.image,
+            "-lc",
+            f"{install_cmd} && {serve_cmd}",
+        ]
+    else:
+        cmd = docker_cmd + [cfg.image, *vllm_args]
 
     print("Running:")
-    print(" ".join(cmd))
+    print(shlex.join(cmd))
 
     subprocess.run(cmd, check=True)
 

@@ -1,6 +1,10 @@
 model: mistralai/Voxtral-Mini-3B-2507
+image: vllm/vllm-openai:v0.17.1
+extra_deps:
+  - vllm[audio]==0.17.1
+  - mistral-common[audio]
 port: 8000
-container_name: vllm-audio-server-voxtral
+container_name: vllm-stt-server-voxtral
 gpu_memory_utilization: 0.95
 max_model_len: 100
 max_num_seqs: 1

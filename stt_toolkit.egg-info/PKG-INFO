@@ -1,3 +1,22 @@
+Metadata-Version: 2.4
+Name: stt-toolkit
+Version: 0.1.0
+Summary: Handy scripts to evaluate STT models
+Requires-Python: >=3.12
+Description-Content-Type: text/markdown
+License-File: LICENSE
+Requires-Dist: aiohttp>=3.13.3
+Requires-Dist: datasets>=4.7.0
+Requires-Dist: jiwer>=4.0.0
+Requires-Dist: openai>=2.26.0
+Requires-Dist: pydantic>=2.0
+Requires-Dist: ruff>=0.15.5
+Requires-Dist: silero-vad>=6.2.1
+Requires-Dist: soundfile>=0.13.1
+Requires-Dist: streamlit>=1.49.0
+Requires-Dist: torchcodec>=0.10.0
+Dynamic: license-file
+
 # 💬 stt-toolkit
 Handy scripts to run and evaluate STT models.
 
@@ -5,7 +24,7 @@ Handy scripts to run and evaluate STT models.
 Install the Python Library
 ```
 uv venv
-uv pip install -e .
+uv sync
 ```
 
 Build the vllm docker image with audio features enabled:

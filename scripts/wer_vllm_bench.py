@@ -1,3 +1,29 @@
+"""
+Benchmark transcription accuracy for vLLM-hosted STT models.
+
+Intent
+------
+This script evaluates one or more speech-to-text models served through a
+vLLM OpenAI-compatible audio endpoint. It measures transcription quality with
+Word Error Rate (WER) against reference transcripts from a Hugging Face dataset.
+It is intended for comparing models, checking regressions, and understanding how
+audio speed changes affect recognition quality.
+
+Main flow
+---------
+1. Load a Hugging Face dataset split containing `audio` and `text` fields.
+2. For each YAML model config, check whether the model is already available on
+   the configured vLLM endpoint.
+3. If the model is not running, start it through `scripts/start_vllm.py`.
+4. For each requested audio speed factor, resample the waveform length to
+   simulate faster or slower speech.
+5. Send each audio sample to the OpenAI-compatible transcription endpoint.
+6. Normalize reference and predicted text, compute per-sample WER, then compute
+   aggregate WER for the full split.
+7. Save results as JSON under `results/wer_bench` by default.
+8. Stop any vLLM server that was started by this script.
+"""
+
 import os
 import sys
 import time
@@ -10,8 +36,11 @@ import numpy as np
 
 from openai import OpenAI
 from datasets import load_dataset
-from utils import waveform_to_in_memory_wav, safe_filename
 from datetime import datetime, timezone
+
+from stt_toolkit.config import Config
+from stt_toolkit.utils import waveform_to_in_memory_wav, safe_filename
+
 
 from jiwer import (
     wer,
@@ -110,9 +139,9 @@ def main():
             continue
 
         with open(config_path, "r", encoding="utf-8") as f:
-            cfg = yaml.safe_load(f)
+            cfg = Config.model_validate(yaml.safe_load(f) or {})
 
-        model = cfg["model"]
+        model = cfg.model
 
         results = {
             "metadata": {
