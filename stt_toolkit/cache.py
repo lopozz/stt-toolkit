@@ -105,7 +105,7 @@ class ResultCache:
         models: list[str] | None = None,
         tasks: list[str] | None = None,
     ) -> ResultCollection:
-        model_filter = {_normalize_model_name(model) for model in models or []}
+        model_filter = set(models or [])
         task_filter = set(tasks or [])
         loaded: list[dict[str, Any]] = []
 
@@ -121,7 +121,7 @@ class ResultCache:
 
             model = metadata.get("model")
             task = metadata.get("task") or metadata.get("dataset")
-            if model_filter and not (model_filter & _model_aliases(str(model))):
+            if model_filter and model not in model_filter:
                 continue
             if task_filter and task not in task_filter:
                 continue
@@ -192,7 +192,7 @@ class SpeedResultCache:
         self,
         models: list[str] | None = None,
     ) -> ResultCollection:
-        model_filter = {_normalize_model_name(model) for model in models or []}
+        model_filter = set(models or [])
         loaded: list[dict[str, Any]] = []
 
         for path in sorted((self.root / "batched_transcription_bench").rglob("*.json")):
@@ -206,7 +206,7 @@ class SpeedResultCache:
                 continue
 
             model = metadata.get("model")
-            if model_filter and not (model_filter & _model_aliases(str(model))):
+            if model_filter and model not in model_filter:
                 continue
 
             payload["_path"] = str(path)
@@ -225,15 +225,3 @@ def _model_dir(model: str) -> str:
     if len(model_parts) == 2:
         return f"{_safe_filename(model_parts[0])}__{_safe_filename(model_parts[1])}"
     return _safe_filename(str(model))
-
-
-def _model_aliases(model: str) -> set[str]:
-    aliases = {model}
-    if "/" in model:
-        aliases.add(model.rsplit("/", maxsplit=1)[-1])
-    aliases.add(_safe_filename(model))
-    return {_normalize_model_name(alias) for alias in aliases}
-
-
-def _normalize_model_name(model: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "", model.lower())
