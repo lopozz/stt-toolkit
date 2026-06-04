@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+
 @dataclass
 class ResultCollection:
     results: list[dict[str, Any]]
@@ -45,12 +46,27 @@ class ResultCollection:
 
     @staticmethod
     def _is_speed_result(result_data: dict[str, Any]) -> bool:
-        return any(isinstance(value, dict) and "wer" in value for value in result_data.values())
+        return any(
+            isinstance(value, dict) and "wer" in value for value in result_data.values()
+        )
 
 
 class ResultCache:
     def __init__(self, root: str | Path = "results"):
         self.root = Path(root).expanduser()
+
+    def has_result(self, model: str, task: str) -> bool:
+        return self.result_path(model, task).exists()
+
+    def result_path(self, model: str, task: str) -> Path:
+        model_parts = str(model).split("/", maxsplit=1)
+        if len(model_parts) == 2:
+            model_dir = (
+                f"{_safe_filename(model_parts[0])}__{_safe_filename(model_parts[1])}"
+            )
+        else:
+            model_dir = _safe_filename(str(model))
+        return self.root / "wer_bench" / model_dir / f"{_safe_filename(str(task))}.json"
 
     def save_result(self, result: dict[str, Any]) -> Path:
         metadata = result.setdefault("metadata", {})
@@ -59,16 +75,8 @@ class ResultCache:
 
         model = metadata["model"]
         task = metadata.get("task") or metadata.get("dataset") or "unknown_task"
-        model_parts = str(model).split("/", maxsplit=1)
-        if len(model_parts) == 2:
-            model_dir = f"{_safe_filename(model_parts[0])}__{_safe_filename(model_parts[1])}"
-        else:
-            model_dir = _safe_filename(str(model))
-
-        output_dir = self.root / "wer_bench" / model_dir
-        output_dir.mkdir(parents=True, exist_ok=True)
-
-        output_path = output_dir / f"{_safe_filename(str(task))}.json"
+        output_path = self.result_path(model, task)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_text(
             json.dumps(result, ensure_ascii=False, indent=2),
             encoding="utf-8",

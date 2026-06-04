@@ -88,6 +88,11 @@ def parse_args():
         default=[1.0],
         help="Audio speed factors to evaluate, e.g. --speeds 1.0 2.0",
     )
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Rerun benchmarks even when a cached result already exists",
+    )
 
     return parser.parse_args()
 
@@ -142,6 +147,10 @@ def main():
 
         model = cfg.model
         task = f"{args.dataset}[{args.split}]"
+        if cache.has_result(model, task) and not args.overwrite:
+            print(f"Skipping cached result: model={model}, task={task}")
+            print(f"Cached file: {cache.result_path(model, task)}")
+            continue
 
         results = {
             "metadata": {
