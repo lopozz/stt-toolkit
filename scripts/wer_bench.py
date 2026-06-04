@@ -1,18 +1,7 @@
-"""
-Config-driven WER benchmark CLI.
-
-Runs `stt_toolkit.evaluate(..., benchmark="wer")` and stores results through
-ResultCache.
-"""
-
-import argparse
 import os
-import subprocess
-import sys
-import time
-
-import stt_toolkit
 import yaml
+import argparse
+import stt_toolkit
 
 from stt_toolkit import ResultCache
 from stt_toolkit.backends import VllmBackend, WhisperCppBackend, model_is_ready
@@ -64,57 +53,27 @@ def run_vllm(cfg: VllmConfig, config_path: str, args, cache: ResultCache):
         print(f"Cached file: {cache.result_path(cfg.model, task_name)}")
         return
 
-    started_here = False
-    try:
-        if not model_is_ready(cfg.base_url, cfg.model):
-            print("Model not ready, starting vLLM server...")
-            subprocess.run(
-                [
-                    sys.executable,
-                    os.path.join("scripts", "start_vllm.py"),
-                    config_path,
-                ],
-                check=True,
-            )
-            started_here = True
-
-            for _ in range(60 // 2):
-                if model_is_ready(cfg.base_url, cfg.model):
-                    break
-                print("vLLM is loading...")
-                time.sleep(10)
-            else:
-                raise RuntimeError("vLLM server did not become ready")
-
-        backend = VllmBackend(model=cfg.model, base_url=cfg.base_url)
-        task = {
-            "dataset": args.dataset,
-            "split": args.split,
-            "speeds": args.speeds,
-        }
-
-        stt_toolkit.evaluate(
-            model=cfg.model,
-            tasks=[task],
-            cache=cache,
-            backend=backend,
-            benchmark="wer",
-            kwargs={"overwrite": args.overwrite},
+    if not model_is_ready(cfg.base_url, cfg.model):
+        raise RuntimeError(
+            f"Model is not ready on {cfg.base_url}: {cfg.model}. "
+            f"Start it with: .venv/bin/python scripts/start_vllm.py {config_path}"
         )
 
-    finally:
-        if started_here:
-            subprocess.run(
-                [
-                    sys.executable,
-                    os.path.join("scripts", "stop_vllm.py"),
-                    config_path,
-                ],
-                check=False,
-                capture_output=True,
-                text=True,
-            )
-            time.sleep(5)
+    backend = VllmBackend(model=cfg.model, base_url=cfg.base_url)
+    task = {
+        "dataset": args.dataset,
+        "split": args.split,
+        "speeds": args.speeds,
+    }
+
+    stt_toolkit.evaluate(
+        model=cfg.model,
+        tasks=[task],
+        cache=cache,
+        backend=backend,
+        benchmark="wer",
+        kwargs={"overwrite": args.overwrite},
+    )
 
 
 def run_whispercpp(cfg: WhisperCppConfig, args, cache: ResultCache):
