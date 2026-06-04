@@ -1,8 +1,0 @@
-version: "3.9"
-
-services:
-  vllm:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: vllm-openai-audio:v0.17.1
