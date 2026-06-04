@@ -1,56 +1,22 @@
 """
 Benchmark transcription accuracy for vLLM-hosted STT models.
 
-Intent
-------
-This script evaluates one or more speech-to-text models served through a
-vLLM OpenAI-compatible audio endpoint. It measures transcription quality with
-Word Error Rate (WER) against reference transcripts from a Hugging Face dataset.
-It is intended for comparing models, checking regressions, and understanding how
-audio speed changes affect recognition quality.
-
-Main flow
----------
-1. Load a Hugging Face dataset split containing `audio` and `text` fields.
-2. For each YAML model config, check whether the model is already available on
-   the configured vLLM endpoint.
-3. If the model is not running, start it through `scripts/start_vllm.py`.
-4. For each requested audio speed factor, resample the waveform length to
-   simulate faster or slower speech.
-5. Send each audio sample to the OpenAI-compatible transcription endpoint.
-6. Normalize reference and predicted text, compute per-sample WER, then compute
-   aggregate WER for the full split.
-7. Save results as JSON under `results/wer_bench` by default.
-8. Stop any vLLM server that was started by this script.
+This CLI starts a vLLM backend when needed, then runs the generic
+`stt_toolkit.evaluate(..., benchmark="wer")` entrypoint.
 """
 
+import argparse
 import os
+import subprocess
 import sys
 import time
+
+import stt_toolkit
 import yaml
-import httpx
-import argparse
-import subprocess
-import numpy as np
 
-from openai import OpenAI
-from datasets import load_dataset
-from datetime import datetime, timezone
-
+from stt_toolkit import ResultCache
+from stt_toolkit.backends.vllm import VllmBackend, model_is_ready
 from stt_toolkit.config import Config
-from stt_toolkit.cache import ResultCache
-from stt_toolkit.utils import waveform_to_in_memory_wav
-
-
-from jiwer import (
-    wer,
-    Compose,
-    ToLowerCase,
-    RemovePunctuation,
-    RemoveMultipleSpaces,
-    Strip,
-    ReduceToListOfListOfWords,
-)
 
 
 def parse_args():
@@ -93,49 +59,19 @@ def parse_args():
         action="store_true",
         help="Rerun benchmarks even when a cached result already exists",
     )
-
     return parser.parse_args()
-
-
-def model_is_ready(base_url, model):
-    try:
-        r = httpx.get(f"{base_url}/models", timeout=2.0)
-        r.raise_for_status()
-        models = [m["id"] for m in r.json().get("data", [])]
-        return model in models
-    except Exception:
-        return False
-
-
-def change_audio_speed(waveform, speed):
-    if speed <= 0:
-        raise ValueError(f"Invalid speed: {speed}")
-    if speed == 1.0:
-        return np.asarray(waveform, dtype=np.float32)
-
-    waveform = np.asarray(waveform, dtype=np.float32)
-    new_length = max(1, int(len(waveform) / speed))
-    src_positions = np.arange(len(waveform), dtype=np.float32)
-    dst_positions = np.linspace(0, len(waveform) - 1, new_length, dtype=np.float32)
-    return np.interp(dst_positions, src_positions, waveform).astype(np.float32)
 
 
 def main():
     args = parse_args()
     cache = ResultCache(args.output_dir)
+    task = {
+        "dataset": args.dataset,
+        "split": args.split,
+        "speeds": args.speeds,
+    }
+    task_name = f"{args.dataset}[{args.split}]"
 
-    print(f"Loading dataset: {args.dataset} [{args.split}]")
-    ds = load_dataset(args.dataset, split=args.split)
-
-    norm = Compose(
-        [
-            ToLowerCase(),
-            RemovePunctuation(),
-            RemoveMultipleSpaces(),
-            Strip(),
-            ReduceToListOfListOfWords(),
-        ]
-    )
     for config_path in args.configs:
         started_here = False
         if not os.path.exists(config_path):
@@ -146,29 +82,14 @@ def main():
             cfg = Config.model_validate(yaml.safe_load(f) or {})
 
         model = cfg.model
-        task = f"{args.dataset}[{args.split}]"
-        if cache.has_result(model, task) and not args.overwrite:
-            print(f"Skipping cached result: model={model}, task={task}")
-            print(f"Cached file: {cache.result_path(model, task)}")
+        if cache.has_result(model, task_name) and not args.overwrite:
+            print(f"Skipping cached result: model={model}, task={task_name}")
+            print(f"Cached file: {cache.result_path(model, task_name)}")
             continue
-
-        results = {
-            "metadata": {
-                "created_at": datetime.now(timezone.utc).isoformat(),
-                "model": model,
-                "task": task,
-                "dataset": args.dataset,
-                "split": args.split,
-                "speeds": args.speeds,
-                "benchmark": "wer_bench",
-            },
-            "results": {},
-        }
 
         try:
             if not model_is_ready(args.base_url, model):
                 print("Model not ready, starting vLLM server...")
-
                 subprocess.run(
                     [
                         sys.executable,
@@ -177,7 +98,6 @@ def main():
                     ],
                     check=True,
                 )
-
                 started_here = True
 
                 for _ in range(60 // 2):
@@ -188,69 +108,15 @@ def main():
                 else:
                     raise RuntimeError("vLLM server did not become ready")
 
-            print("Sending audio data...")
-
-            client = OpenAI(
-                base_url=args.base_url,
-                api_key="EMPTY",
+            backend = VllmBackend(model=model, base_url=args.base_url)
+            stt_toolkit.evaluate(
+                model=model,
+                tasks=[task],
+                cache=cache,
+                backend=backend,
+                benchmark="wer",
+                kwargs={"overwrite": args.overwrite},
             )
-
-            for speed in args.speeds:
-                refs, preds = [], []
-                speed_key = f"{speed:g}x"
-                results["results"][speed_key] = {"wer": None, "samples": []}
-
-                print(f"\nEvaluating speed {speed_key}...")
-
-                for i, example in enumerate(ds):
-                    ref_text = example["text"].replace("\n", " ").strip()
-                    audio = example["audio"]
-                    sped_up_audio = change_audio_speed(audio["array"], speed)
-
-                    buffer = waveform_to_in_memory_wav(
-                        sped_up_audio, audio["sampling_rate"]
-                    )
-                    response = client.audio.transcriptions.create(
-                        model=model,
-                        file=buffer,
-                    )
-                    pred_text = response.text.strip()
-
-                    sample_wer = wer(
-                        ref_text,
-                        pred_text,
-                        reference_transform=norm,
-                        hypothesis_transform=norm,
-                    )
-
-                    refs.append(ref_text)
-                    preds.append(pred_text)
-
-                    sample_result = {
-                        "source": example.get("source", f"sample_{i}"),
-                        "wer": sample_wer,
-                        "pred": pred_text,
-                    }
-                    results["results"][speed_key]["samples"].append(sample_result)
-
-                    print(
-                        f"[{i + 1}/{len(ds)}] {sample_result['source']}  "
-                        f"speed={speed_key}  WER={sample_wer:.3f}"
-                    )
-
-                overall_wer = wer(
-                    refs, preds, reference_transform=norm, hypothesis_transform=norm
-                )
-                results["results"][speed_key]["wer"] = overall_wer
-
-                print("\n" + "=" * 100)
-                print("RESULTS")
-                print("=" * 100)
-                print(f"Dataset     : {args.dataset} [{args.split}]")
-                print(f"Model       : {model}")
-                print(f"Speed       : {speed_key}")
-                print(f"Overall WER : {overall_wer:.4f}")
-                print("=" * 100)
 
         except Exception as e:
             print(f"Failed to process {config_path}: {type(e).__name__} - {e}")
@@ -268,10 +134,6 @@ def main():
                     text=True,
                 )
                 time.sleep(5)
-
-            output_path = cache.save_result(results)
-
-            print(f"Saved results to: {output_path}")
 
     print("BENCHMARK FINISHED")
 
