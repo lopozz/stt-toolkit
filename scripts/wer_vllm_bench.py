@@ -27,7 +27,6 @@ Main flow
 import os
 import sys
 import time
-import json
 import yaml
 import httpx
 import argparse
@@ -39,7 +38,8 @@ from datasets import load_dataset
 from datetime import datetime, timezone
 
 from stt_toolkit.config import Config
-from stt_toolkit.utils import waveform_to_in_memory_wav, safe_filename
+from stt_toolkit.cache import ResultCache
+from stt_toolkit.utils import waveform_to_in_memory_wav
 
 
 from jiwer import (
@@ -117,8 +117,7 @@ def change_audio_speed(waveform, speed):
 
 def main():
     args = parse_args()
-    output_dir = os.path.join(args.output_dir, "wer_bench")
-    os.makedirs(output_dir, exist_ok=True)
+    cache = ResultCache(args.output_dir)
 
     print(f"Loading dataset: {args.dataset} [{args.split}]")
     ds = load_dataset(args.dataset, split=args.split)
@@ -142,13 +141,17 @@ def main():
             cfg = Config.model_validate(yaml.safe_load(f) or {})
 
         model = cfg.model
+        task = f"{args.dataset}[{args.split}]"
 
         results = {
             "metadata": {
                 "created_at": datetime.now(timezone.utc).isoformat(),
                 "model": model,
-                "dataset": f"{args.dataset}[{args.split}]",
+                "task": task,
+                "dataset": args.dataset,
+                "split": args.split,
                 "speeds": args.speeds,
+                "benchmark": "wer_bench",
             },
             "results": {},
         }
@@ -257,12 +260,7 @@ def main():
                 )
                 time.sleep(5)
 
-            dataset_name = safe_filename(args.dataset)
-            model_name = safe_filename(model)
-            output_path = os.path.join(output_dir, f"{dataset_name}--{model_name}.json")
-
-            with open(output_path, "w", encoding="utf-8") as f:
-                json.dump(results, f, ensure_ascii=False, indent=2)
+            output_path = cache.save_result(results)
 
             print(f"Saved results to: {output_path}")
 
