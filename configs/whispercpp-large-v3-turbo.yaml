@@ -2,5 +2,3 @@ backend: whispercpp
 model: whispercpp/large-v3-turbo
 whispercpp_model_path: whisper.cpp/models/ggml-large-v3-turbo.bin
 language: it
-threads: 8
-processors: 1

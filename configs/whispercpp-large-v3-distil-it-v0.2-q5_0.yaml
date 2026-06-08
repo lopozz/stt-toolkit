@@ -2,5 +2,3 @@ backend: whispercpp
 model: whispercpp/whisper-large-v3-distil-it-v0.2-q5_0
 whispercpp_model_path: whisper.cpp/models/whisper-large-v3-distil-it-v0.2/ggml-model-q5_0.bin
 language: it
-threads: 8
-processors: 1

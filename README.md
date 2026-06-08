@@ -81,9 +81,9 @@ Metrics:
 Load cached speed results:
 
 ```python
-from stt_toolkit import SpeedResultCache
+from stt_toolkit import BatchSpeedResultCache
 
-cache = SpeedResultCache("results")
+cache = BatchSpeedResultCache("results")
 results = cache.load_results(
     models=["openai/whisper-large-v3-turbo"],
 )
@@ -92,7 +92,7 @@ df = results.to_dataframe()
 ```
 
 
-#### whisper.cpp setup
+## whisper.cpp backend setup
 
 If you want to use [whisper.cpp](https://github.com/ggml-org/whisper.cpp), build it from source:
 

@@ -38,6 +38,18 @@ def parse_args():
         help="Number of sequential transcription runs",
     )
     parser.add_argument(
+        "--threads",
+        type=int,
+        nargs="+",
+        help="Thread counts to benchmark. Defaults to the config value.",
+    )
+    parser.add_argument(
+        "--processors",
+        type=int,
+        nargs="+",
+        help="Processor counts to benchmark. Defaults to the config value.",
+    )
+    parser.add_argument(
         "--output-dir",
         default="results",
         help="Directory where JSON result files are saved",
@@ -64,13 +76,6 @@ def main():
 
         try:
             if cfg.backend == "whispercpp":
-                backend = WhisperCppBackend(
-                    model_path=cfg.whispercpp_model_path,
-                    language=cfg.language,
-                    threads=cfg.threads,
-                    processors=cfg.processors,
-                    extra_args=cfg.extra_whispercpp_args,
-                )
                 tasks = [
                     {
                         "audio_file": args.audio_file,
@@ -83,14 +88,30 @@ def main():
                     f"Unsupported backend for local speed benchmark: {cfg.backend}"
                 )
 
-            run_speed_benchmark(
-                model=cfg.model,
-                tasks=tasks,
-                cache=cache,
-                backend=backend,
-                runs=args.runs,
-                overwrite=args.overwrite,
-            )
+            thread_values = args.threads
+            processor_values = args.processors
+
+            for threads in thread_values:
+                for processors in processor_values:
+                    print(
+                        "\nRunning config: "
+                        f"{config_path} | threads={threads} | processors={processors}"
+                    )
+                    backend = WhisperCppBackend(
+                        model_path=cfg.whispercpp_model_path,
+                        language=cfg.language,
+                        threads=threads,
+                        processors=processors,
+                        extra_args=cfg.extra_whispercpp_args,
+                    )
+                    run_speed_benchmark(
+                        model=cfg.model,
+                        tasks=tasks,
+                        cache=cache,
+                        backend=backend,
+                        runs=args.runs,
+                        overwrite=args.overwrite,
+                    )
         except Exception as e:
             print(f"Failed to process {config_path}: {type(e).__name__} - {e}")
 
