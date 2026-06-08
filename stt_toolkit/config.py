@@ -41,6 +41,7 @@ class WhisperCppConfig(BaseConfig):
     whispercpp_model_path: str
     language: str | None = None
     threads: int | None = None
+    processors: int | None = None
     extra_whispercpp_args: list[str] = Field(default_factory=list)
 
 

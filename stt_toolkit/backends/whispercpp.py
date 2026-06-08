@@ -12,11 +12,13 @@ class WhisperCppBackend:
         model_path: str,
         language: str | None = None,
         threads: int | None = None,
+        processors: int | None = None,
         extra_args: list[str] | None = None,
     ):
         self.model_path = model_path
         self.language = language
         self.threads = threads
+        self.processors = processors
         self.extra_args = extra_args or []
 
     def transcribe(self, audio_file) -> str:
@@ -46,6 +48,8 @@ class WhisperCppBackend:
                 cmd.extend(["-l", self.language])
             if self.threads:
                 cmd.extend(["-t", str(self.threads)])
+            if self.processors:
+                cmd.extend(["-p", str(self.processors)])
             cmd.extend(self.extra_args)
 
             completed = subprocess.run(

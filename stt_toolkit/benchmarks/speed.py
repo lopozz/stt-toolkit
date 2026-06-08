@@ -119,14 +119,18 @@ def run_speed_benchmark(
                 model=model,
                 audio_file=str(audio_path),
                 threads=backend.threads,
+                processors=backend.processors,
             )
             and not overwrite
         ):
             print(f"Skipping cached result: model={model}, audio_file={audio_path}")
-            print(
-                "Cached file: "
-                f"{cache.result_path(model, str(audio_path), backend.threads)}"
+            cached_path = cache.result_path(
+                model,
+                str(audio_path),
+                backend.threads,
+                backend.processors,
             )
+            print(f"Cached file: {cached_path}")
             continue
 
         audio_bytes = audio_path.read_bytes()
@@ -190,6 +194,7 @@ def run_speed_benchmark(
                 "model": model,
                 "audio_file": str(audio_path),
                 "threads": backend.threads,
+                "processors": backend.processors,
                 "benchmark": "transcription_bench",
             },
             "results": {

@@ -68,6 +68,7 @@ def main():
                     model_path=cfg.whispercpp_model_path,
                     language=cfg.language,
                     threads=cfg.threads,
+                    processors=cfg.processors,
                     extra_args=cfg.extra_whispercpp_args,
                 )
                 tasks = [

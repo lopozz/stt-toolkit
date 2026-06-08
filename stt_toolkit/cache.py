@@ -29,6 +29,7 @@ class ResultCollection:
                     {
                         **base_row,
                         "threads": metadata.get("threads"),
+                        "processors": metadata.get("processors"),
                         "audio_length_s": metadata.get("audio_length_s")
                         or result_data.get("audio_length_s"),
                         "avg_latency_s": result_data.get("avg_latency_s"),
@@ -130,11 +131,15 @@ class SpeedResultCache(ResultCache):
         model: str,
         audio_file: str,
         threads: int | None,
+        processors: int | None,
     ) -> Path:
         audio_name = Path(audio_file).stem
         threads_label = "default" if threads is None else str(threads)
+        processors_label = "default" if processors is None else str(processors)
         filename = (
-            f"{_safe_filename(audio_name)}_{_safe_filename(threads_label)}threads.json"
+            f"{_safe_filename(audio_name)}_"
+            f"{_safe_filename(threads_label)}threads_"
+            f"{_safe_filename(processors_label)}processors.json"
         )
         return self.root / self.benchmark_name / _model_dir(model) / filename
 
@@ -143,11 +148,13 @@ class SpeedResultCache(ResultCache):
         model: str,
         audio_file: str,
         threads: int | None,
+        processors: int | None,
     ) -> bool:
         return self.result_path(
             model=model,
             audio_file=audio_file,
             threads=threads,
+            processors=processors,
         ).exists()
 
     def save_result(self, result: dict[str, Any]) -> Path:
@@ -159,6 +166,7 @@ class SpeedResultCache(ResultCache):
             model=metadata["model"],
             audio_file=metadata["audio_file"],
             threads=metadata.get("threads"),
+            processors=metadata.get("processors"),
         )
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_text(

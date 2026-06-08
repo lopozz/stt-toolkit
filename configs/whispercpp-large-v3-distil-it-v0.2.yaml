@@ -3,3 +3,4 @@ model: whispercpp/whisper-large-v3-distil-it-v0.2
 whispercpp_model_path: whisper.cpp/models/whisper-large-v3-distil-it-v0.2/ggml-model.bin
 language: it
 threads: 16
+processors: 1
