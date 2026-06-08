@@ -85,7 +85,6 @@ def run_whispercpp(cfg: WhisperCppConfig, args, cache: ResultCache):
 
     backend = WhisperCppBackend(
         model_path=cfg.whispercpp_model_path,
-        executable=cfg.whispercpp_executable,
         language=cfg.language,
         threads=cfg.threads,
         extra_args=cfg.extra_whispercpp_args,

@@ -7,7 +7,9 @@ This CLI is a thin wrapper around `stt_toolkit.benchmarks.speed`.
 import argparse
 import asyncio
 
-from stt_toolkit.benchmarks.speed import run_speed_benchmark
+from stt_toolkit.benchmarks.speed import run_server_speed_benchmark
+from stt_toolkit.backends import VllmBackend
+from stt_toolkit.cache import BatchSpeedResultCache
 
 LOCAL_AUDIO_FILE = "./data/network_1976/mad_as_hell.wav"
 
@@ -60,13 +62,24 @@ def parse_args():
 
 async def main():
     args = parse_args()
-    await run_speed_benchmark(
-        base_url=args.base_url,
+    cache = BatchSpeedResultCache(args.output_dir)
+    backend = VllmBackend(model=args.model, base_url=args.base_url)
+    tasks = [
+        {
+            "audio_file": args.audio_file,
+            "requests": args.requests,
+            "concurrency": args.concurrency,
+            "overwrite": args.overwrite,
+        }
+    ]
+
+    await run_server_speed_benchmark(
         model=args.model,
+        tasks=tasks,
+        cache=cache,
+        backend=backend,
         request_counts=args.requests,
         concurrency_values=args.concurrency,
-        audio_file=args.audio_file,
-        output_dir=args.output_dir,
         overwrite=args.overwrite,
     )
 

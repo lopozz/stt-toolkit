@@ -39,7 +39,6 @@ class VllmConfig(BaseConfig):
 class WhisperCppConfig(BaseConfig):
     backend: Literal["whispercpp"] = "whispercpp"
     whispercpp_model_path: str
-    whispercpp_executable: str = "whisper-cli"
     language: str | None = None
     threads: int | None = None
     extra_whispercpp_args: list[str] = Field(default_factory=list)

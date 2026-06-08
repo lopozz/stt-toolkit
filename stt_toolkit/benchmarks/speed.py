@@ -1,3 +1,4 @@
+import io
 import time
 import wave
 import asyncio
@@ -5,13 +6,12 @@ import asyncio
 from pathlib import Path
 from datetime import datetime, timezone
 
-
-from stt_toolkit.backends.vllm import VllmBackend
-from stt_toolkit.cache import SpeedResultCache
+from stt_toolkit.backends import STTBackend, VllmBackend, WhisperCppBackend
+from stt_toolkit.cache import SpeedResultCache, BatchSpeedResultCache
 
 
 async def single_request(
-    backend: VllmBackend,
+    backend: STTBackend,
     audio_bytes: bytes,
 ) -> dict:
     start = time.perf_counter()
@@ -28,7 +28,7 @@ async def single_request(
 
 
 async def run_benchmark(
-    backend: VllmBackend,
+    backend: STTBackend,
     audio_bytes: bytes,
     total_requests: int,
     concurrency: int,
@@ -89,83 +89,208 @@ def compute_metrics(
     }
 
 
-async def run_speed_benchmark(
-    base_url: str,
+def run_speed_benchmark(
     model: str,
-    request_counts: list[int],
-    concurrency_values: list[int],
-    audio_file: str,
-    output_dir: str,
+    tasks: list[dict],
+    cache: SpeedResultCache,
+    backend: STTBackend,
+    runs: int = 1,
     overwrite: bool = False,
-) -> None:
-    cache = SpeedResultCache(output_dir)
-    audio_path = Path(audio_file)
-    if not audio_path.exists():
-        raise FileNotFoundError(f"Audio file not found: {audio_path}")
-
-    audio_bytes = audio_path.read_bytes()
-
-    with wave.open(str(audio_path), "rb") as wf:
-        sample_rate = wf.getframerate()
-        n_frames = wf.getnframes()
-        recording_length_s = n_frames / sample_rate
-
-    print(f"Audio file: {audio_path}")
-    print(
-        f"Audio duration: {recording_length_s:.2f}s  |  Sample rate: {sample_rate} Hz"
+):
+    assert isinstance(backend, WhisperCppBackend), (
+        "run_speed_benchmark only supports WhisperCppBackend"
     )
 
-    backend = VllmBackend(model=model, base_url=base_url)
+    for task in tasks:
+        audio_path = Path(task["audio_file"])
 
-    for requests in request_counts:
-        for concurrency in concurrency_values:
-            if (
-                cache.has_result(
-                    model=model,
-                    audio_file=str(audio_path),
-                    requests=requests,
-                    concurrency=concurrency,
-                    audio_length_s=recording_length_s,
-                )
-                and not overwrite
-            ):
-                print(
-                    f"Skipping cached result: model={model}, "
-                    f"requests={requests}, concurrency={concurrency}"
-                )
-                print(
-                    "Cached file: "
-                    f"{cache.result_path(model, str(audio_path), requests, concurrency, recording_length_s)}"
-                )
-                continue
+        if runs < 1:
+            raise ValueError("runs must be >= 1")
+        if not audio_path.exists():
+            raise FileNotFoundError(f"Audio file not found: {audio_path}")
 
-            print(
-                f"\nRunning benchmark: "
-                f"model={model}, requests={requests}, concurrency={concurrency}"
-            )
-            wall_start = time.perf_counter()
-            results = await run_benchmark(
-                backend=backend,
-                audio_bytes=audio_bytes,
-                total_requests=requests,
-                concurrency=concurrency,
-            )
-            wall_time = time.perf_counter() - wall_start
+        with wave.open(str(audio_path), "rb") as wf:
+            sample_rate = wf.getframerate()
+            n_frames = wf.getnframes()
+            recording_length_s = n_frames / sample_rate
 
-            metrics = compute_metrics(
-                results,
+        if (
+            cache.has_result(
                 model=model,
                 audio_file=str(audio_path),
-                recording_length_s=recording_length_s,
-                total_requests=requests,
-                concurrency=concurrency,
-                wall_time_s=wall_time,
+                threads=backend.threads,
+            )
+            and not overwrite
+        ):
+            print(f"Skipping cached result: model={model}, audio_file={audio_path}")
+            print(
+                "Cached file: "
+                f"{cache.result_path(model, str(audio_path), backend.threads)}"
+            )
+            continue
+
+        audio_bytes = audio_path.read_bytes()
+        transcription_times_s: list[float] = []
+        total_times_s: list[float] = []
+        load_times_s: list[float] = []
+        timing_runs: list[dict] = []
+        errors = 0
+
+        print(f"Audio file: {audio_path}")
+        print(
+            f"Audio duration: {recording_length_s:.2f}s  |  Sample rate: {sample_rate} Hz"
+        )
+
+        for run in range(runs):
+            audio_buffer = io.BytesIO(audio_bytes)
+            audio_buffer.name = audio_path.name
+
+            try:
+                transcription = backend.transcribe_with_timings(audio_buffer)
+            except Exception as exc:
+                errors += 1
+                print(f"Run {run + 1}/{runs} failed: {exc}")
+                continue
+
+            timings = transcription["timings"]
+            timing_runs.append(timings)
+            transcription_time_ms = timings["transcription_time_ms"]
+            total_time_ms = timings["total_time_ms"]
+            load_time_ms = timings["load_time_ms"]
+
+            transcription_time_s = transcription_time_ms / 1000
+            transcription_times_s.append(transcription_time_s)
+            total_times_s.append(total_time_ms / 1000)
+            load_times_s.append(load_time_ms / 1000)
+
+            load_display = load_time_ms / 1000
+            total_display = total_time_ms / 1000
+            print(
+                f"Run {run + 1}/{runs}: "
+                f"transcription={transcription_time_s:.4f}s, "
+                f"load={load_display:.4f}s, "
+                f"total={total_display:.4f}s"
             )
 
-            print("\n--- Results ---")
-            for key, value in metrics.items():
-                print(f"  {key}: {value}")
+        if not transcription_times_s:
+            raise RuntimeError(
+                "No successful speed benchmark runs with parsed whisper.cpp timings"
+            )
 
-            output_path = cache.save_result(metrics)
+        avg_transcription_time_s = sum(transcription_times_s) / len(
+            transcription_times_s
+        )
+        avg_total_time_s = sum(total_times_s) / len(total_times_s)
+        avg_load_time_s = sum(load_times_s) / len(load_times_s)
+        rtf = recording_length_s / avg_transcription_time_s
 
-            print(f"\nResults saved to {output_path}")
+        metrics = {
+            "metadata": {
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "model": model,
+                "audio_file": str(audio_path),
+                "threads": backend.threads,
+                "benchmark": "transcription_bench",
+            },
+            "results": {
+                "audio_length_s": round(recording_length_s, 3),
+                "avg_latency_s": round(avg_transcription_time_s, 4),
+                "avg_load_time_s": round(avg_load_time_s, 4),
+                "avg_total_time_s": round(avg_total_time_s, 4),
+                "rtf": round(rtf, 4),
+            },
+            "timings": timing_runs,
+            "errors": errors,
+        }
+
+        output_path = cache.save_result(metrics)
+        print(f"\nResults saved to {output_path}")
+
+    return cache.load_results(models=[model])
+
+
+async def run_server_speed_benchmark(
+    model: str,
+    tasks: list[dict],
+    cache: BatchSpeedResultCache,
+    backend: STTBackend,
+    request_counts: list[int] = [50],
+    concurrency_values: list[int] = [8],
+    overwrite: bool = False,
+) -> None:
+    assert isinstance(backend, VllmBackend), (
+        "run_server_speed_benchmark only supports VllmBackend"
+    )
+
+    for task in tasks:
+        audio_path = Path(task["audio_file"])
+
+        if not audio_path.exists():
+            raise FileNotFoundError(f"Audio file not found: {audio_path}")
+
+        audio_bytes = audio_path.read_bytes()
+
+        with wave.open(str(audio_path), "rb") as wf:
+            sample_rate = wf.getframerate()
+            n_frames = wf.getnframes()
+            recording_length_s = n_frames / sample_rate
+
+        print(f"Audio file: {audio_path}")
+        print(
+            f"Audio duration: {recording_length_s:.2f}s  |  Sample rate: {sample_rate} Hz"
+        )
+
+        for requests in request_counts:
+            for concurrency in concurrency_values:
+                if (
+                    cache.has_result(
+                        model=model,
+                        audio_file=str(audio_path),
+                        requests=requests,
+                        concurrency=concurrency,
+                        audio_length_s=recording_length_s,
+                    )
+                    and not overwrite
+                ):
+                    print(
+                        f"Skipping cached result: model={model}, "
+                        f"requests={requests}, concurrency={concurrency}"
+                    )
+                    print(
+                        "Cached file: "
+                        f"{cache.result_path(model, str(audio_path), requests, concurrency, recording_length_s)}"
+                    )
+                    continue
+
+                print(
+                    f"\nRunning benchmark: "
+                    f"model={model}, requests={requests}, concurrency={concurrency}"
+                )
+                wall_start = time.perf_counter()
+                results = await run_benchmark(
+                    backend=backend,
+                    audio_bytes=audio_bytes,
+                    total_requests=requests,
+                    concurrency=concurrency,
+                )
+                wall_time = time.perf_counter() - wall_start
+
+                metrics = compute_metrics(
+                    results,
+                    model=model,
+                    audio_file=str(audio_path),
+                    recording_length_s=recording_length_s,
+                    total_requests=requests,
+                    concurrency=concurrency,
+                    wall_time_s=wall_time,
+                )
+
+                print("\n--- Results ---")
+                for key, value in metrics.items():
+                    print(f"  {key}: {value}")
+
+                output_path = cache.save_result(metrics)
+
+                print(f"\nResults saved to {output_path}")
+
+    return cache.load_results(models=[model])
