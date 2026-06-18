@@ -45,6 +45,16 @@ class WhisperCppConfig(BaseConfig):
     extra_whispercpp_args: list[str] = Field(default_factory=list)
 
 
+class DatasetConfig(BaseModel):
+    dataset: str
+    split: str = "train"
+    subset: str | None = None
+    audio_column: str = "audio"
+    text_column: str = "text"
+    source_column: str | None = "source"
+    max_samples: int | None = Field(default=None, gt=0)
+
+
 ConfigAdapter = TypeAdapter(VllmConfig | WhisperCppConfig)
 
 

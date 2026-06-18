@@ -1,4 +1,4 @@
 backend: whispercpp
-model: whispercpp/whisper-tiny-it-v1-ggml
+model: whispercpp/whisper-tiny-it-v1
 whispercpp_model_path: whisper.cpp/models/whisper-tiny-it-v1-ggml/ggml-model.bin
 language: it

@@ -4,27 +4,23 @@ import argparse
 import stt_toolkit
 
 from stt_toolkit import ResultCache
+from stt_toolkit.benchmarks.wer import task_name
 from stt_toolkit.backends import VllmBackend, WhisperCppBackend, model_is_ready
-from stt_toolkit.config import Config, VllmConfig, WhisperCppConfig
+from stt_toolkit.config import Config, DatasetConfig, VllmConfig, WhisperCppConfig
 
 
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--configs",
+        "--model-configs",
         nargs="+",
         required=True,
         help="YAML configs, one per model/backend",
     )
     parser.add_argument(
-        "--dataset",
-        default="lopozz/accenti_italiani",
-        help="Hugging Face dataset name",
-    )
-    parser.add_argument(
-        "--split",
-        default="train",
-        help="Dataset split to use",
+        "--dataset-config",
+        required=True,
+        help="YAML config for the Hugging Face dataset",
     )
     parser.add_argument(
         "--output-dir",
@@ -70,25 +66,23 @@ def build_backend(cfg: VllmConfig | WhisperCppConfig, config_path: str):
 def run_benchmark(
     cfg: VllmConfig | WhisperCppConfig,
     config_path: str,
+    dataset_cfg: DatasetConfig,
     args,
     cache: ResultCache,
 ):
-    task_name = f"{args.dataset}[{args.split}]"
-    if cache.has_result(cfg.model, task_name) and not args.overwrite:
-        print(f"Skipping cached result: model={cfg.model}, task={task_name}")
-        print(f"Cached file: {cache.result_path(cfg.model, task_name)}")
+    task = task_name(dataset_cfg.model_dump())
+    if cache.has_result(cfg.model, task) and not args.overwrite:
+        print(f"Skipping cached result: model={cfg.model}, task={task}")
+        print(f"Cached file: {cache.result_path(cfg.model, task)}")
         return
 
     backend = build_backend(cfg, config_path)
-    task = {
-        "dataset": args.dataset,
-        "split": args.split,
-        "speeds": args.speeds,
-    }
+    task_config = dataset_cfg.model_dump()
+    task_config["speeds"] = args.speeds
 
     stt_toolkit.evaluate(
         model=cfg.model,
-        tasks=[task],
+        tasks=[task_config],
         cache=cache,
         backend=backend,
         benchmark="wer",
@@ -100,7 +94,10 @@ def main():
     args = parse_args()
     cache = ResultCache(args.output_dir)
 
-    for config_path in args.configs:
+    with open(args.dataset_config, "r", encoding="utf-8") as f:
+        dataset_cfg = DatasetConfig.model_validate(yaml.safe_load(f) or {})
+
+    for config_path in args.model_configs:
         if not os.path.exists(config_path):
             print(f"Skipping: {config_path} (File not found)")
             continue
@@ -109,7 +106,13 @@ def main():
             cfg = Config.model_validate(yaml.safe_load(f) or {})
 
         try:
-            run_benchmark(cfg=cfg, config_path=config_path, args=args, cache=cache)
+            run_benchmark(
+                cfg=cfg,
+                config_path=config_path,
+                dataset_cfg=dataset_cfg,
+                args=args,
+                cache=cache,
+            )
         except Exception as e:
             print(f"Failed to process {config_path}: {type(e).__name__} - {e}")
 

@@ -30,6 +30,30 @@ def change_audio_speed(waveform, speed: float):
     return np.interp(dst_positions, src_positions, waveform).astype(np.float32)
 
 
+def task_name(task_config: dict) -> str:
+    dataset_name = task_config["dataset"]
+    split = task_config["split"]
+    subset = task_config.get("subset")
+    max_samples = task_config["max_samples"]
+
+    name = f"{dataset_name}[{split}]"
+    if subset:
+        name = f"{dataset_name}/{subset}[{split}]"
+    if max_samples is not None:
+        name = f"{name}[:{max_samples}]"
+    return name
+
+
+def load_task_dataset(task_config: dict):
+    dataset_name = task_config["dataset"]
+    subset = task_config["subset"]
+    split = task_config["split"]
+
+    if subset:
+        return load_dataset(dataset_name, subset, split=split, streaming=True)
+    return load_dataset(dataset_name, split=split, streaming=True)
+
+
 def evaluate_wer(
     model: str,
     tasks: list[dict],
@@ -58,9 +82,14 @@ def evaluate_wer(
 
     for task_config in tasks:
         dataset_name = task_config["dataset"]
-        split = task_config.get("split", "train")
-        task_speeds = task_config.get("speeds", speeds)
-        task = f"{dataset_name}[{split}]"
+        split = task_config["split"]
+        task_speeds = task_config["speeds"]
+        subset = task_config["subset"]
+        audio_column = task_config["audio_column"]
+        text_column = task_config["text_column"]
+        source_column = task_config["source_column"]
+        max_samples = task_config["max_samples"]
+        task = task_name(task_config)
         task_names.append(task)
 
         if cache.has_result(model, task) and not overwrite:
@@ -68,8 +97,8 @@ def evaluate_wer(
             print(f"Cached file: {cache.result_path(model, task)}")
             continue
 
-        print(f"Loading dataset: {dataset_name} [{split}]")
-        dataset = load_dataset(dataset_name, split=split)
+        dataset_label = f"{dataset_name}/{subset}" if subset else dataset_name
+        print(f"Streaming dataset: {dataset_label} [{split}]")
 
         results = {
             "metadata": {
@@ -77,7 +106,12 @@ def evaluate_wer(
                 "model": model,
                 "task": task,
                 "dataset": dataset_name,
+                "subset": subset,
                 "split": split,
+                "audio_column": audio_column,
+                "text_column": text_column,
+                "source_column": source_column,
+                "max_samples": max_samples,
                 "speeds": task_speeds,
                 "benchmark": "wer_bench",
             },
@@ -92,9 +126,13 @@ def evaluate_wer(
 
             print(f"\nEvaluating speed {speed_key}...")
 
+            dataset = load_task_dataset(task_config)
             for i, example in enumerate(dataset):
-                ref_text = example["text"].replace("\n", " ").strip()
-                audio = example["audio"]
+                if max_samples is not None and i >= max_samples:
+                    break
+
+                ref_text = example[text_column].replace("\n", " ").strip()
+                audio = example[audio_column]
                 sped_up_audio = change_audio_speed(audio["array"], speed)
                 buffer = waveform_to_in_memory_wav(
                     sped_up_audio, audio["sampling_rate"]
@@ -112,14 +150,16 @@ def evaluate_wer(
                 preds.append(pred_text)
 
                 sample_result = {
-                    "source": example.get("source", f"sample_{i}"),
+                    "source": example.get(source_column, f"sample_{i}")
+                    if source_column
+                    else f"sample_{i}",
                     "wer": sample_wer,
                     "pred": pred_text,
                 }
                 results["results"][speed_key]["samples"].append(sample_result)
 
                 print(
-                    f"[{i + 1}/{len(dataset)}] {sample_result['source']}  "
+                    f"[{i + 1}] {sample_result['source']}  "
                     f"speed={speed_key}  WER={sample_wer:.3f}"
                 )
 
@@ -131,7 +171,7 @@ def evaluate_wer(
             print("\n" + "=" * 100)
             print("RESULTS")
             print("=" * 100)
-            print(f"Dataset     : {dataset_name} [{split}]")
+            print(f"Dataset     : {dataset_label} [{split}]")
             print(f"Model       : {model}")
             print(f"Speed       : {speed_key}")
             print(f"Overall WER : {overall_wer:.4f}")

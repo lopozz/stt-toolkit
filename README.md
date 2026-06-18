@@ -26,13 +26,12 @@ import stt_toolkit
 ### WER benchmark
 
 Measures transcription quality with Word Error Rate (WER) over a Hugging Face
-dataset containing `audio` and `text` fields.
+dataset described by a dataset config.
 
 ```bash
 .venv/bin/python scripts/wer_bench.py \
-  --configs configs/whisper-large-v3-turbo.yaml \
-  --dataset lopozz/accenti_italiani \
-  --split train \
+  --model-configs configs/models/whisper-large-v3-turbo.yaml \
+  --dataset-config configs/datasets/lopozz-accenti-italiani.yaml \
   --speeds 1.0
 ```
 
@@ -54,9 +53,8 @@ Run the same WER benchmark with whisper.cpp:
 
 ```bash
 .venv/bin/python scripts/wer_bench.py \
-  --configs configs/whispercpp-large-v3-turbo.yaml \
-  --dataset lopozz/accenti_italiani \
-  --split train
+  --model-configs configs/models/whispercpp-large-v3-turbo.yaml \
+  --dataset-config configs/datasets/lopozz-accenti-italiani.yaml
 ```
 
 ### Speed benchmark

@@ -22,6 +22,7 @@ class ResultCollection:
             result_data = item.get("results", {})
             base_row = {
                 "model": metadata.get("model"),
+                "task": metadata.get("task") or metadata.get("dataset"),
             }
 
             if self._is_speed_result(result_data):
