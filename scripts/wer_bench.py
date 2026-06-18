@@ -46,51 +46,40 @@ def parse_args():
     return parser.parse_args()
 
 
-def run_vllm(cfg: VllmConfig, config_path: str, args, cache: ResultCache):
-    task_name = f"{args.dataset}[{args.split}]"
-    if cache.has_result(cfg.model, task_name) and not args.overwrite:
-        print(f"Skipping cached result: model={cfg.model}, task={task_name}")
-        print(f"Cached file: {cache.result_path(cfg.model, task_name)}")
-        return
+def build_backend(cfg: VllmConfig | WhisperCppConfig, config_path: str):
+    if cfg.backend == "vllm":
+        if not model_is_ready(cfg.base_url, cfg.model):
+            raise RuntimeError(
+                f"Model is not ready on {cfg.base_url}: {cfg.model}. "
+                f"Start it with: .venv/bin/python scripts/start_vllm.py {config_path}"
+            )
 
-    if not model_is_ready(cfg.base_url, cfg.model):
-        raise RuntimeError(
-            f"Model is not ready on {cfg.base_url}: {cfg.model}. "
-            f"Start it with: .venv/bin/python scripts/start_vllm.py {config_path}"
+        return VllmBackend(model=cfg.model, base_url=cfg.base_url)
+
+    if cfg.backend == "whispercpp":
+        return WhisperCppBackend(
+            model_path=cfg.whispercpp_model_path,
+            language=cfg.language,
+            threads=cfg.threads,
+            processors=cfg.processors,
+            extra_args=cfg.extra_whispercpp_args,
         )
-
-    backend = VllmBackend(model=cfg.model, base_url=cfg.base_url)
-    task = {
-        "dataset": args.dataset,
-        "split": args.split,
-        "speeds": args.speeds,
-    }
-
-    stt_toolkit.evaluate(
-        model=cfg.model,
-        tasks=[task],
-        cache=cache,
-        backend=backend,
-        benchmark="wer",
-        kwargs={"overwrite": args.overwrite},
-    )
+    raise ValueError(f"Unsupported backend: {cfg.backend}")
 
 
-def run_whispercpp(cfg: WhisperCppConfig, args, cache: ResultCache):
+def run_benchmark(
+    cfg: VllmConfig | WhisperCppConfig,
+    config_path: str,
+    args,
+    cache: ResultCache,
+):
     task_name = f"{args.dataset}[{args.split}]"
     if cache.has_result(cfg.model, task_name) and not args.overwrite:
         print(f"Skipping cached result: model={cfg.model}, task={task_name}")
         print(f"Cached file: {cache.result_path(cfg.model, task_name)}")
         return
 
-    backend = WhisperCppBackend(
-        model_path=cfg.whispercpp_model_path,
-        language=cfg.language,
-        threads=cfg.threads,
-        processors=cfg.processors,
-        extra_args=cfg.extra_whispercpp_args,
-    )
-
+    backend = build_backend(cfg, config_path)
     task = {
         "dataset": args.dataset,
         "split": args.split,
@@ -120,12 +109,7 @@ def main():
             cfg = Config.model_validate(yaml.safe_load(f) or {})
 
         try:
-            if cfg.backend == "vllm":
-                run_vllm(cfg=cfg, config_path=config_path, args=args, cache=cache)
-            elif cfg.backend == "whispercpp":
-                run_whispercpp(cfg=cfg, args=args, cache=cache)
-            else:
-                raise ValueError(f"Unsupported backend: {cfg.backend}")
+            run_benchmark(cfg=cfg, config_path=config_path, args=args, cache=cache)
         except Exception as e:
             print(f"Failed to process {config_path}: {type(e).__name__} - {e}")
 
