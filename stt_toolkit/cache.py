@@ -40,13 +40,10 @@ class ResultCollection:
                 )
             elif self._is_batched_speed_result(result_data):
                 raise NotImplementedError("Cache does not implement this method")
+            elif self._is_wer_result(result_data):
+                rows.extend(self._wer_rows(base_row, result_data))
             else:
-                rows.append(
-                    {
-                        **base_row,
-                        "wer": result_data["wer"],
-                    }
-                )
+                raise ValueError(f"Unsupported result format: {result_data.keys()}")
         return rows
 
     @staticmethod
@@ -56,6 +53,27 @@ class ResultCollection:
     @staticmethod
     def _is_batched_speed_result(result_data: dict[str, Any]) -> bool:
         return False
+
+    @staticmethod
+    def _is_wer_result(result_data: dict[str, Any]) -> bool:
+        return any(
+            isinstance(value, dict) and "wer" in value for value in result_data.values()
+        )
+
+    @staticmethod
+    def _wer_rows(
+        base_row: dict[str, Any],
+        result_data: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        return [
+            {
+                **base_row,
+                "speed": speed,
+                "wer": speed_result["wer"],
+            }
+            for speed, speed_result in result_data.items()
+            if isinstance(speed_result, dict) and "wer" in speed_result
+        ]
 
 
 class ResultCache:
