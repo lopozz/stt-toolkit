@@ -45,6 +45,12 @@ class WhisperCppConfig(BaseConfig):
     extra_whispercpp_args: list[str] = Field(default_factory=list)
 
 
+class TransformersConfig(BaseConfig):
+    backend: Literal["transformers"] = "transformers"
+    device: str = "cuda:0"
+    dtype: str = "auto"
+
+
 class DatasetConfig(BaseModel):
     dataset: str
     split: str = "train"
@@ -55,7 +61,7 @@ class DatasetConfig(BaseModel):
     max_samples: int | None = Field(default=None, gt=0)
 
 
-ConfigAdapter = TypeAdapter(VllmConfig | WhisperCppConfig)
+ConfigAdapter = TypeAdapter(VllmConfig | WhisperCppConfig | TransformersConfig)
 
 
 class Config:

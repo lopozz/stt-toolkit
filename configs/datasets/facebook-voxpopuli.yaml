@@ -4,4 +4,4 @@ split: test
 audio_column: audio
 text_column: normalized_text
 source_column: audio_id
-max_samples: 10
+max_samples: 100

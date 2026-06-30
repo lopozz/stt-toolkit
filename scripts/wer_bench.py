@@ -5,8 +5,17 @@ import stt_toolkit
 
 from stt_toolkit import ResultCache
 from stt_toolkit.benchmarks.wer import task_name
-from stt_toolkit.backends import VllmBackend, WhisperCppBackend, model_is_ready
-from stt_toolkit.config import Config, DatasetConfig, VllmConfig, WhisperCppConfig
+from stt_toolkit.backends import (
+    TransformersBackend,
+    VllmBackend,
+    WhisperCppBackend,
+    model_is_ready,
+)
+from stt_toolkit.config import (
+    Config,
+    BaseConfig,
+    DatasetConfig,
+)
 
 
 def parse_args():
@@ -42,7 +51,10 @@ def parse_args():
     return parser.parse_args()
 
 
-def build_backend(cfg: VllmConfig | WhisperCppConfig, config_path: str):
+def build_backend(
+    cfg: BaseConfig,
+    config_path: str,
+):
     if cfg.backend == "vllm":
         if not model_is_ready(cfg.base_url, cfg.model):
             raise RuntimeError(
@@ -60,11 +72,17 @@ def build_backend(cfg: VllmConfig | WhisperCppConfig, config_path: str):
             processors=cfg.processors,
             extra_args=cfg.extra_whispercpp_args,
         )
+    if cfg.backend == "transformers":
+        return TransformersBackend(
+            model=cfg.model,
+            device=cfg.device,
+            dtype=cfg.dtype,
+        )
     raise ValueError(f"Unsupported backend: {cfg.backend}")
 
 
 def run_benchmark(
-    cfg: VllmConfig | WhisperCppConfig,
+    cfg: BaseConfig,
     config_path: str,
     dataset_cfg: DatasetConfig,
     args,
