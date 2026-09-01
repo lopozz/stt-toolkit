@@ -1,0 +1,7 @@
+dataset: fixie-ai/common_voice_17_0
+subset: it
+split: test
+audio_column: audio
+text_column: sentence
+source_column: path
+max_samples: 100
