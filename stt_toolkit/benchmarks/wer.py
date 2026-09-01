@@ -1,7 +1,9 @@
 import numpy as np
 
+from tqdm import tqdm
 from datasets import load_dataset
 from datetime import datetime, timezone
+
 from jiwer import (
     Compose,
     ReduceToListOfListOfWords,
@@ -13,8 +15,8 @@ from jiwer import (
 )
 
 from stt_toolkit.cache import ResultCache
-from stt_toolkit.utils import waveform_to_in_memory_wav
 from stt_toolkit.backends import STTBackend
+from stt_toolkit.utils import waveform_to_in_memory_wav
 
 
 def change_audio_speed(waveform, speed: float):
@@ -122,7 +124,16 @@ def evaluate_wer(
             print(f"\nEvaluating speed {speed_key}...")
 
             dataset = load_task_dataset(task_config)
-            for i, example in enumerate(dataset):
+            total = dataset.info.splits[split].num_examples
+            if max_samples is not None:
+                total = min(total, max_samples)
+            progress = tqdm(
+                dataset,
+                total=total,
+                desc=f"{task} @ {speed_key}",
+                unit="sample",
+            )
+            for i, example in enumerate(progress):
                 if max_samples is not None and i >= max_samples:
                     break
 
@@ -153,10 +164,8 @@ def evaluate_wer(
                 }
                 results["results"][speed_key]["samples"].append(sample_result)
 
-                print(
-                    f"[{i + 1}] {sample_result['source']}  "
-                    f"speed={speed_key}  WER={sample_wer:.3f}"
-                )
+                progress.set_postfix(wer=f"{sample_wer:.3f}")
+            progress.close()
 
             overall_wer = wer(
                 refs, preds, reference_transform=norm, hypothesis_transform=norm

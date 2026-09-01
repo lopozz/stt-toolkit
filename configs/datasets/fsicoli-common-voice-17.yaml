@@ -4,4 +4,4 @@ split: test
 audio_column: audio
 text_column: sentence
 source_column: path
-max_samples: 100
+# max_samples: 100
