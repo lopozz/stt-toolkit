@@ -1,9 +1,9 @@
 backend: vllm
 model: mistralai/Voxtral-Mini-3B-2507
 base_url: http://localhost:8000/v1
-image: vllm/vllm-openai:v0.17.1
+image: vllm/vllm-openai:v0.20.1
 extra_deps:
-  - vllm[audio]==0.17.1
+  - vllm[audio]==v0.20.1
   - mistral-common[audio]
 port: 8000
 container_name: vllm-stt-server-voxtral

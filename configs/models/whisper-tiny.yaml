@@ -1,11 +1,11 @@
 backend: vllm
-model: bofenghuang/whisper-large-v3-distil-it-v0.2
+model: openai/whisper-tiny
 base_url: http://localhost:8000/v1
 image: vllm/vllm-openai:v0.20.1
 extra_deps:
   - vllm[audio]==v0.20.1
 port: 8000
 container_name: vllm-stt-server-whisper
-gpu_memory_utilization: 0.95
+gpu_memory_utilization: 0.2
 max_model_len: 448
 max_num_seqs: 4

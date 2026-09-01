@@ -1,9 +1,9 @@
 backend: vllm
 model: openai/whisper-large-v3-turbo
 base_url: http://localhost:8000/v1
-image: vllm/vllm-openai:v0.17.1
+image: vllm/vllm-openai:v0.20.1
 extra_deps:
-  - vllm[audio]==0.17.1
+  - vllm[audio]==v0.20.1configs/models/whisper-large-v3-distil-it-v0.2.yaml 
 port: 8000
 container_name: vllm-stt-server-whisper
 gpu_memory_utilization: 0.95
