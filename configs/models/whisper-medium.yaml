@@ -1,5 +1,5 @@
 backend: vllm
-model: openai/whisper-tiny
+model: openai/whisper-medium
 base_url: http://localhost:8000/v1
 image: vllm/vllm-openai:v0.20.1
 extra_deps:
