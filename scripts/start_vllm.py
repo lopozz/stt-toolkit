@@ -59,6 +59,9 @@ def main():
         f"{os.path.expanduser('~')}/.cache/huggingface:/root/.cache/huggingface",
     ]
 
+    if cfg.api_key:
+        docker_cmd.extend(["-e", f"VLLM_API_KEY={cfg.api_key}"])
+
     vllm_args = [
         cfg.model,
         "--host",

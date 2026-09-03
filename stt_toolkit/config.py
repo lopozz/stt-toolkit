@@ -1,3 +1,4 @@
+import os
 from typing import Literal
 
 from pydantic import BaseModel, Field, TypeAdapter
@@ -14,6 +15,7 @@ class VllmConfig(BaseConfig):
     port: int = 8000
     container_name: str = "vllm-stt-server"
     base_url: str = "http://localhost:8000/v1"
+    api_key: str | None = Field(default_factory=lambda: os.environ.get("VLLM_API_KEY"))
 
     gpu_memory_utilization: float = 0.95
     max_model_len: int = 448

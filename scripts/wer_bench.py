@@ -56,13 +56,13 @@ def build_backend(
     config_path: str,
 ):
     if cfg.backend == "vllm":
-        if not model_is_ready(cfg.base_url, cfg.model):
+        if not model_is_ready(cfg.base_url, cfg.model, api_key=cfg.api_key):
             raise RuntimeError(
                 f"Model is not ready on {cfg.base_url}: {cfg.model}. "
                 f"Start it with: .venv/bin/python scripts/start_vllm.py {config_path}"
             )
 
-        return VllmBackend(model=cfg.model, base_url=cfg.base_url)
+        return VllmBackend(model=cfg.model, base_url=cfg.base_url, api_key=cfg.api_key)
 
     if cfg.backend == "whispercpp":
         return WhisperCppBackend(
