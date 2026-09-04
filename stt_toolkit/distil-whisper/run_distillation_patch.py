@@ -1126,6 +1126,15 @@ def main():
         f"Number of trainable parameters: {sum(p.numel() for p in student_model.parameters() if p.requires_grad):.3e}"
     )
 
+    # PATCH: optimization - skip the teacher's (redundant) feature extraction
+    # entirely when it would produce the exact same array as the student's
+    # (e.g. small+small pairings, or any case where the two checkpoints share
+    # a feature extractor config). Only pairings that actually disagree (e.g.
+    # a whisper-large-v3 teacher, 128 mel bins, over a non-v3 student, 80 mel
+    # bins) need the second extraction at all - see prepare_train_dataset/
+    # prepare_eval_dataset and the collator, which check this flag.
+    same_feature_extractor = feature_extractor.to_dict() == teacher_feature_extractor.to_dict()
+
     share_hidden_states = training_args.freeze_encoder and student_model.config.d_model == teacher_model.config.d_model
     if share_hidden_states:
         # tie the weights for the teacher encoder if we're freezing the student and it's the same as the teacher
@@ -1260,9 +1269,12 @@ def main():
         batch["input_features"] = inputs.input_features
         batch["input_length"] = [len(sample) for sample in audio]
         # PATCH: separate feature extraction for the teacher (see the NOTE by
-        # teacher_feature_extractor's loading, a few hundred lines up).
-        teacher_inputs = teacher_feature_extractor(audio, sampling_rate=sampling_rate)
-        batch["teacher_input_features"] = teacher_inputs.input_features
+        # teacher_feature_extractor's loading, a few hundred lines up) - but
+        # only when actually needed (see same_feature_extractor), to avoid
+        # paying for a second, redundant mel-spectrogram pass every example.
+        if not same_feature_extractor:
+            teacher_inputs = teacher_feature_extractor(audio, sampling_rate=sampling_rate)
+            batch["teacher_input_features"] = teacher_inputs.input_features
 
         # process text targets - for training these are the Whisper-generated pseudo-labels
         input_str_batched = batch[train_text_column_name]
@@ -1343,8 +1355,9 @@ def main():
         batch["input_features"] = inputs.input_features[0]
         batch["input_length"] = len(sample["array"])
         # PATCH: separate feature extraction for the teacher (see prepare_train_dataset).
-        teacher_inputs = teacher_feature_extractor(sample["array"], sampling_rate=sample["sampling_rate"])
-        batch["teacher_input_features"] = teacher_inputs.input_features[0]
+        if not same_feature_extractor:
+            teacher_inputs = teacher_feature_extractor(sample["array"], sampling_rate=sample["sampling_rate"])
+            batch["teacher_input_features"] = teacher_inputs.input_features[0]
 
         # process targets - for evaluation these are the ground-truth transcriptions
         input_str = batch["text"]

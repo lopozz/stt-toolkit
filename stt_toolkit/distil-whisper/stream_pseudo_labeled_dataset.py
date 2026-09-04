@@ -20,6 +20,7 @@ from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 
 import datasets
+import numpy as np
 import requests
 import soundfile as sf
 from huggingface_hub import get_token, hf_hub_download, hf_hub_url
@@ -231,6 +232,12 @@ def stream_pseudo_labeled(
         filtered_jobs(), fetch_job, max_in_flight=max_in_flight
     ):
         array, sampling_rate = sf.read(io.BytesIO(audio_bytes))
+        # PATCH: force a real 1D float32 ndarray regardless of what this
+        # environment's soundfile/numpy combo hands back (observed returning
+        # a plain Python list on at least one Colab setup, which crashes
+        # datasets' Audio.encode_example - it calls `.T` on the array,
+        # assuming a numpy array).
+        array = np.asarray(array, dtype=np.float32)
         print(f"[{tag}] yielded #{n + 1}: decoded audio ({len(array)} samples @ {sampling_rate}Hz) from {zip_path}")
 
         yield {
