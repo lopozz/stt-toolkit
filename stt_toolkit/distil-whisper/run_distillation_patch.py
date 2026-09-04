@@ -852,11 +852,20 @@ def main():
     # 4. Detecting last checkpoint and eventually continue from last checkpoint
     last_checkpoint = None
     # PATCH: `overwrite_output_dir` was removed from TrainingArguments in newer
-    # transformers versions (we're on 5.12.1, this script predates that).
+    # transformers versions (we're on 5.12.1, this script predates that), so
+    # there's no longer any way to pass True for it via the CLI. That combined
+    # with `Accelerator(project_dir=output_dir, ...)`/`init_trackers(...)` a few
+    # lines above (which writes a tensorboard event file into output_dir
+    # immediately on startup, whenever a tracker is active) means this check
+    # would ALWAYS raise from this point on, regardless of what the caller does
+    # beforehand (even an `rm -rf` right before launching can't win - the
+    # script repopulates the directory itself before this check runs). So:
+    # default permissive instead of blocking, since the "protect against
+    # accidental overwrite" behavior this guarded can no longer be expressed.
     if (
         os.path.isdir(training_args.output_dir)
         and training_args.do_train
-        and not getattr(training_args, "overwrite_output_dir", False)
+        and not getattr(training_args, "overwrite_output_dir", True)
     ):
         last_checkpoint = get_last_checkpoint(training_args.output_dir)
         if last_checkpoint is None and len(os.listdir(training_args.output_dir)) > 0:
