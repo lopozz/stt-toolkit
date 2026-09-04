@@ -20,7 +20,6 @@ from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 
 import datasets
-import numpy as np
 import requests
 import soundfile as sf
 from huggingface_hub import get_token, hf_hub_download, hf_hub_url
@@ -231,17 +230,26 @@ def stream_pseudo_labeled(
     for (record, zip_path, offset, length), audio_bytes in _bounded_prefetch(
         filtered_jobs(), fetch_job, max_in_flight=max_in_flight
     ):
-        array, sampling_rate = sf.read(io.BytesIO(audio_bytes))
-        # PATCH: force a real 1D float32 ndarray regardless of what this
-        # environment's soundfile/numpy combo hands back (observed returning
-        # a plain Python list on at least one Colab setup, which crashes
-        # datasets' Audio.encode_example - it calls `.T` on the array,
-        # assuming a numpy array).
-        array = np.asarray(array, dtype=np.float32)
-        print(f"[{tag}] yielded #{n + 1}: decoded audio ({len(array)} samples @ {sampling_rate}Hz) from {zip_path}")
+        # PATCH: pass the already-fetched, already-valid WAV bytes straight
+        # through as an encoded Audio value ({"bytes": ..., "path": None}),
+        # instead of decoding with sf.read() ourselves and handing datasets a
+        # decoded {"array": ..., "sampling_rate": ...} dict. The latter forced
+        # datasets' Audio.encode_example to immediately RE-encode it back to
+        # WAV bytes for storage - a wasteful decode+reencode round trip, and
+        # on at least one Colab environment that re-encode path crashed
+        # (`'list' object has no attribute 'T'`), for reasons that traced
+        # back to a soundfile/numpy version quirk we couldn't fully pin down
+        # remotely. Passing bytes through directly skips that code path
+        # entirely - datasets decodes lazily on read instead (e.g. when
+        # prepare_train_dataset accesses `sample["array"]`), the same as any
+        # normal streaming HF audio dataset.
+        info = sf.info(io.BytesIO(audio_bytes))
+        print(
+            f"[{tag}] yielded #{n + 1}: {info.frames} samples @ {info.samplerate}Hz from {zip_path} (not decoded yet)"
+        )
 
         yield {
-            "audio": {"array": array, "sampling_rate": sampling_rate},
+            "audio": {"bytes": audio_bytes, "path": None},
             "text": record.get("text"),
             "whisper_transcript": record.get("whisper_transcript"),
             "condition_on_prev": bool(record.get("condition_on_prev", False)),
@@ -370,7 +378,10 @@ def main():
 
         if args.save_audio_dir:
             out_path = f"{args.save_audio_dir}/{i:03d}_{example.get('id')}.wav"
-            sf.write(out_path, audio["array"], audio["sampling_rate"])
+            # `audio["bytes"]` is already valid WAV data (see the PATCH note
+            # in stream_pseudo_labeled) - just write it out directly.
+            with open(out_path, "wb") as f:
+                f.write(audio["bytes"])
             print(f"    saved audio -> {out_path}")
 
 
