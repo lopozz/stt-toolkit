@@ -40,6 +40,10 @@ SENTINEL_NAME = "it-multilingual-pseudo-labeled"
 # (e.g. IT_EVAL_HOLDOUT_SIZE=2000) once you're doing a real training run.
 EVAL_HOLDOUT_SIZE = int(os.environ.get("IT_EVAL_HOLDOUT_SIZE", "20"))
 
+# Concurrent audio fetches PER SOURCE (7 sources interleaved -> peak total
+# concurrency is roughly 7x this). Override via env var, e.g. IT_MAX_IN_FLIGHT=8.
+MAX_IN_FLIGHT = int(os.environ.get("IT_MAX_IN_FLIGHT", "4"))
+
 WER_THRESHOLD = 20.0
 
 import run_distillation_patch as rd  # noqa: E402  (same directory, not a package import)
@@ -62,7 +66,7 @@ def _patched_load_dataset(path, name=None, split="train", streaming=True, **kwar
 
     # Rebuilding this per call keeps train/eval disjoint: both start from the
     # same deterministic interleaving order (fixed seed), so skip/take never overlap.
-    full = stream_it_multilingual(wer_threshold=WER_THRESHOLD)
+    full = stream_it_multilingual(wer_threshold=WER_THRESHOLD, max_in_flight=MAX_IN_FLIGHT)
 
     if split == "train":
         print(f"[_patched_load_dataset] split=train -> skipping first {EVAL_HOLDOUT_SIZE} interleaved examples")

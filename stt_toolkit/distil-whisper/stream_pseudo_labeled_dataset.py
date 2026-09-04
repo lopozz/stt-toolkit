@@ -108,10 +108,15 @@ def resolve_zip_path(manifest_path: str, audio_zip_filepath: str) -> tuple[str, 
 
 # Shared across all threads/sources so concurrent fetches reuse warm
 # (keep-alive) connections instead of each paying a fresh TLS handshake -
-# measured ~1.2s/request cold vs ~0.7-0.9s reused. pool_maxsize sized generously
-# for interleaving many sources at once, each with its own thread pool.
+# measured ~1.2s/request cold vs ~0.7-0.9s reused. pool_maxsize needs to
+# cover peak concurrency = max_in_flight * number of active sources (7 for
+# the full IT_MANIFESTS interleave) - e.g. max_in_flight=8 -> 56 concurrent
+# connections. Sized with headroom above that; below it, urllib3 silently
+# starts discarding/recreating connections past pool_maxsize instead of
+# reusing them, quietly reintroducing the cold-handshake cost this exists
+# to avoid.
 _session = requests.Session()
-_adapter = requests.adapters.HTTPAdapter(pool_connections=32, pool_maxsize=32)
+_adapter = requests.adapters.HTTPAdapter(pool_connections=128, pool_maxsize=128)
 _session.mount("https://", _adapter)
 _session.mount("http://", _adapter)
 
