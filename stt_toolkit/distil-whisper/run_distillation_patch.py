@@ -434,6 +434,9 @@ class DataCollatorSpeechSeq2SeqWithPadding:
     input_padding: Union[bool, str] = "max_length"
     target_padding: Union[bool, str] = "max_length"
     max_target_length: Optional[int] = None
+    # PATCH: the teacher's own feature extractor, used to pad `teacher_input_features`
+    # (see the NOTE on teacher_feature_extractor's loading in main()).
+    teacher_feature_extractor: Any = None
 
     def __call__(self, features: List[Dict[str, Union[List[int], np.ndarray]]]) -> Dict[str, np.ndarray]:
         # split inputs and labels since they have to be of different lengths and need
@@ -449,6 +452,20 @@ class DataCollatorSpeechSeq2SeqWithPadding:
             padding=self.input_padding,
             return_tensors="pt",
         )
+
+        # PATCH: pad the teacher's separately-extracted features the same way,
+        # using the teacher's own feature extractor (only present/needed when
+        # student and teacher don't share one - see teacher_feature_extractor).
+        if self.teacher_feature_extractor is not None and "teacher_input_features" in features[0]:
+            teacher_input_features = {
+                "input_features": [feature["teacher_input_features"] for feature in features]
+            }
+            teacher_batch = self.teacher_feature_extractor.pad(
+                teacher_input_features,
+                padding=self.input_padding,
+                return_tensors="pt",
+            )
+            batch["teacher_input_features"] = teacher_batch["input_features"]
 
         labels_batch = self.processor.tokenizer.pad(
             label_features,
@@ -990,6 +1007,21 @@ def main():
         revision=model_args.model_revision,
         token=model_args.token,
     )
+    # PATCH: separate feature extraction for the teacher. Whisper-large-v3 uses
+    # 128 mel bins where every other Whisper size uses 80 - the original script
+    # computed ONE `input_features` tensor (from the student's feature
+    # extractor) and fed it to both models, which crashes if student and
+    # teacher disagree on mel-bin count. Load the teacher's own feature
+    # extractor here; `prepare_train_dataset`/`prepare_eval_dataset` compute a
+    # second `teacher_input_features` from it, and train_step/eval_step use
+    # that one for the teacher's forward pass instead of reusing the
+    # student's. When student and teacher DO share an extractor (the
+    # `share_hidden_states` case), this is a harmless duplicate load/compute.
+    teacher_feature_extractor = WhisperFeatureExtractor.from_pretrained(
+        model_args.teacher_model_name_or_path,
+        cache_dir=model_args.cache_dir,
+        token=model_args.token,
+    )
     tokenizer = WhisperTokenizerFast.from_pretrained(
         (model_args.tokenizer_name if model_args.tokenizer_name else model_args.model_name_or_path),
         cache_dir=model_args.cache_dir,
@@ -1012,6 +1044,36 @@ def main():
         torch_dtype=teacher_dtype,
         attn_implementation=model_args.attn_implementation,
     )
+    # PATCH: vocab-size mismatch fix.
+    #
+    # The tokenizer used everywhere in this script (`tokenizer`, loaded above
+    # from the STUDENT's checkpoint) may not have the same vocab size as the
+    # teacher's own native output layer. (`tokenizer.add_tokens(timestamps)`
+    # a few lines up does NOT affect this - verified separately: those tokens
+    # already exist as special tokens in Whisper's tokenizer, so add_tokens()
+    # on them is a no-op for `len(tokenizer)`, both before and after.)
+    #
+    # The real, purely-native mismatch: `openai/whisper-large-v3`'s tokenizer
+    # is vocab size 51866 - one MORE than every other Whisper checkpoint
+    # (51865, e.g. whisper-small's), because large-v3 added an extra special
+    # token. If the student is derived from e.g. whisper-small, the teacher's
+    # logits come out one column wider than the student's, and `KLDivLoss` in
+    # `kl_divergence()` crashes with a shape mismatch ("size of tensor a
+    # (51866) must match the size of tensor b (51865)") the first time it
+    # actually runs.
+    #
+    # Resizing the teacher's embeddings/lm_head to `len(tokenizer)` fixes
+    # this by matching its output dimension to whatever every other tensor in
+    # training actually uses. This is a real (if small) change to the
+    # teacher's pretrained output layer - when growing the vocab, the new
+    # row(s) are freshly/randomly initialised, not pretrained - but the
+    # teacher is frozen throughout distillation (see `teacher_model.eval()`
+    # in train_step/eval_step) and never receives gradient updates, so that
+    # row simply sits at whatever (near-arbitrary, near-irrelevant) initial
+    # value it got and never influences training beyond contributing one
+    # extra, functionally-unused entry to the softmax normalisation.
+    if teacher_model.config.vocab_size != len(tokenizer):
+        teacher_model.resize_token_embeddings(len(tokenizer))
 
     student_model = WhisperForConditionalGeneration.from_pretrained(
         model_args.model_name_or_path,
@@ -1197,6 +1259,10 @@ def main():
         inputs = feature_extractor(audio, sampling_rate=sampling_rate)
         batch["input_features"] = inputs.input_features
         batch["input_length"] = [len(sample) for sample in audio]
+        # PATCH: separate feature extraction for the teacher (see the NOTE by
+        # teacher_feature_extractor's loading, a few hundred lines up).
+        teacher_inputs = teacher_feature_extractor(audio, sampling_rate=sampling_rate)
+        batch["teacher_input_features"] = teacher_inputs.input_features
 
         # process text targets - for training these are the Whisper-generated pseudo-labels
         input_str_batched = batch[train_text_column_name]
@@ -1276,6 +1342,9 @@ def main():
         inputs = feature_extractor(sample["array"], sampling_rate=sample["sampling_rate"])
         batch["input_features"] = inputs.input_features[0]
         batch["input_length"] = len(sample["array"])
+        # PATCH: separate feature extraction for the teacher (see prepare_train_dataset).
+        teacher_inputs = teacher_feature_extractor(sample["array"], sampling_rate=sample["sampling_rate"])
+        batch["teacher_input_features"] = teacher_inputs.input_features[0]
 
         # process targets - for evaluation these are the ground-truth transcriptions
         input_str = batch["text"]
@@ -1463,6 +1532,7 @@ def main():
         input_padding="longest",
         target_padding="max_length",
         max_target_length=max_label_length,
+        teacher_feature_extractor=teacher_feature_extractor,  # PATCH
     )
 
     # 14. Define generation arguments - we need to do this before we wrap the models in DDP
@@ -1511,6 +1581,12 @@ def main():
         student_model.train()
         teacher_model.eval()
 
+        # PATCH: `batch` may carry `teacher_input_features` (a separately-extracted
+        # tensor for the teacher's own mel-bin count) alongside `input_features`
+        # (the student's). Pop it out before calling the student - it wouldn't
+        # recognize that kwarg - and swap it in for the teacher's own call below.
+        teacher_input_features = batch.pop("teacher_input_features", None)
+
         student_outputs = student_model(**batch)
         with torch.no_grad():
             if share_hidden_states:
@@ -1520,7 +1596,9 @@ def main():
                 teacher_outputs = teacher_model(encoder_outputs=encoder_outputs, labels=batch["labels"])
             else:
                 # do the full forward pass for the teacher model (encoder + decoder)
-                teacher_outputs = teacher_model(**batch)
+                # PATCH: use the teacher's own input_features when we have them.
+                teacher_batch = batch if teacher_input_features is None else {**batch, "input_features": teacher_input_features}
+                teacher_outputs = teacher_model(**teacher_batch)
 
         # CE (data) loss
         ce_loss = student_outputs.loss
@@ -1541,13 +1619,17 @@ def main():
         student_model.eval()
         teacher_model.eval()
 
+        # PATCH: see the matching comment in train_step.
+        teacher_input_features = batch.pop("teacher_input_features", None)
+
         with torch.no_grad():
             student_outputs = student_model(**batch)
             if share_hidden_states:
                 encoder_outputs = BaseModelOutput(student_outputs.encoder_last_hidden_state.to(dtype=teacher_dtype))
                 teacher_outputs = teacher_model(encoder_outputs=encoder_outputs, labels=batch["labels"])
             else:
-                teacher_outputs = teacher_model(**batch)
+                teacher_batch = batch if teacher_input_features is None else {**batch, "input_features": teacher_input_features}
+                teacher_outputs = teacher_model(**teacher_batch)
 
         # CE (data) loss
         ce_loss = student_outputs.loss
