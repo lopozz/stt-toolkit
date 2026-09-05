@@ -11,7 +11,6 @@ whole (often multi-GB) zip shard.
 """
 
 import argparse
-import io
 import json
 import os
 import posixpath
@@ -21,8 +20,8 @@ from concurrent.futures import ThreadPoolExecutor
 
 import datasets
 import requests
-import soundfile as sf
 from huggingface_hub import get_token, hf_hub_download, hf_hub_url
+from tqdm import tqdm
 
 REPO_ID = "bofenghuang/stt-pseudo-labeled-whisper-large-v3-multilingual"
 
@@ -153,10 +152,17 @@ def fetch_audio_bytes(
     raise last_error
 
 
-def iter_manifest(repo_id: str, manifest_path: str):
-    print(f"[{manifest_path}] downloading/loading manifest...")
+def count_manifest_records(repo_id: str, manifest_path: str) -> int:
+    """Cheap upfront total for the progress bar - the manifest is a small
+    JSONL file (already downloaded/cached by hf_hub_download), so counting
+    its lines costs a local file read, not a network round-trip."""
     local_path = hf_hub_download(repo_id, filename=manifest_path, repo_type="dataset")
-    print(f"[{manifest_path}] manifest ready at {local_path}, starting to read records")
+    with open(local_path, "r", encoding="utf-8") as f:
+        return sum(1 for line in f if line.strip())
+
+
+def iter_manifest(repo_id: str, manifest_path: str):
+    local_path = hf_hub_download(repo_id, filename=manifest_path, repo_type="dataset")
     with open(local_path, "r", encoding="utf-8") as f:
         for line in f:
             line = line.strip()
@@ -216,13 +222,10 @@ def stream_pseudo_labeled(
     """
     tag = source or manifest_path
 
-    def filtered_jobs():
-        seen = 0
+    def filtered_jobs(pbar):
         for record in iter_manifest(repo_id, manifest_path):
-            seen += 1
             if wer_threshold is not None and record.get("wer", float("inf")) >= wer_threshold:
-                if seen % 20 == 0:
-                    print(f"[{tag}] scanned {seen} records so far (filtering by wer < {wer_threshold})")
+                pbar.update(1)
                 continue
             zip_path, offset, length = resolve_zip_path(manifest_path, record["audio_zip_filepath"])
             yield record, zip_path, offset, length
@@ -231,45 +234,45 @@ def stream_pseudo_labeled(
         _record, zip_path, offset, length = job
         return fetch_audio_bytes(repo_id, zip_path, offset, length)
 
+    total_records = count_manifest_records(repo_id, manifest_path)
+
     n = 0
-    for (record, zip_path, offset, length), audio_bytes in _bounded_prefetch(
-        filtered_jobs(), fetch_job, max_in_flight=max_in_flight
-    ):
-        # PATCH: pass the already-fetched, already-valid WAV bytes straight
-        # through as an encoded Audio value ({"bytes": ..., "path": None}),
-        # instead of decoding with sf.read() ourselves and handing datasets a
-        # decoded {"array": ..., "sampling_rate": ...} dict. The latter forced
-        # datasets' Audio.encode_example to immediately RE-encode it back to
-        # WAV bytes for storage - a wasteful decode+reencode round trip, and
-        # on at least one Colab environment that re-encode path crashed
-        # (`'list' object has no attribute 'T'`), for reasons that traced
-        # back to a soundfile/numpy version quirk we couldn't fully pin down
-        # remotely. Passing bytes through directly skips that code path
-        # entirely - datasets decodes lazily on read instead (e.g. when
-        # prepare_train_dataset accesses `sample["array"]`), the same as any
-        # normal streaming HF audio dataset.
-        info = sf.info(io.BytesIO(audio_bytes))
-        print(
-            f"[{tag}] yielded #{n + 1}: {info.frames} samples @ {info.samplerate}Hz from {zip_path} (not decoded yet)"
-        )
+    with tqdm(total=total_records, desc=tag, unit="rec") as pbar:
+        for (record, zip_path, offset, length), audio_bytes in _bounded_prefetch(
+            filtered_jobs(pbar), fetch_job, max_in_flight=max_in_flight
+        ):
+            # PATCH: pass the already-fetched, already-valid WAV bytes straight
+            # through as an encoded Audio value ({"bytes": ..., "path": None}),
+            # instead of decoding with sf.read() ourselves and handing datasets a
+            # decoded {"array": ..., "sampling_rate": ...} dict. The latter forced
+            # datasets' Audio.encode_example to immediately RE-encode it back to
+            # WAV bytes for storage - a wasteful decode+reencode round trip, and
+            # on at least one Colab environment that re-encode path crashed
+            # (`'list' object has no attribute 'T'`), for reasons that traced
+            # back to a soundfile/numpy version quirk we couldn't fully pin down
+            # remotely. Passing bytes through directly skips that code path
+            # entirely - datasets decodes lazily on read instead (e.g. when
+            # prepare_train_dataset accesses `sample["array"]`), the same as any
+            # normal streaming HF audio dataset.
+            yield {
+                "audio": {"bytes": audio_bytes, "path": None},
+                "text": record.get("text"),
+                "whisper_transcript": record.get("whisper_transcript"),
+                "condition_on_prev": bool(record.get("condition_on_prev", False)),
+                "prev_text": record.get("prev_text") or "",
+                "prev_whisper_transcript": record.get("prev_whisper_transcript") or "",
+                "speaker_id": str(record.get("speaker_id")),
+                "duration": float(record.get("duration", 0.0)),
+                "wer": float(record.get("wer", 0.0)),
+                "id": str(record.get("id")),
+                "source": source or "",
+            }
 
-        yield {
-            "audio": {"bytes": audio_bytes, "path": None},
-            "text": record.get("text"),
-            "whisper_transcript": record.get("whisper_transcript"),
-            "condition_on_prev": bool(record.get("condition_on_prev", False)),
-            "prev_text": record.get("prev_text") or "",
-            "prev_whisper_transcript": record.get("prev_whisper_transcript") or "",
-            "speaker_id": str(record.get("speaker_id")),
-            "duration": float(record.get("duration", 0.0)),
-            "wer": float(record.get("wer", 0.0)),
-            "id": str(record.get("id")),
-            "source": source or "",
-        }
-
-        n += 1
-        if max_samples is not None and n >= max_samples:
-            return
+            n += 1
+            pbar.update(1)
+            pbar.set_postfix(kept=n)
+            if max_samples is not None and n >= max_samples:
+                return
 
 
 def to_iterable_dataset(

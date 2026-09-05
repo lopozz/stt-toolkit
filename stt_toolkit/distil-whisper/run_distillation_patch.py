@@ -1740,8 +1740,24 @@ def main():
             train_dataloader = accelerator.skip_first_batches(train_dataloader, resume_step)
             resume_step = None
 
+        # PATCH: timing instrumentation to find out whether batch preparation
+        # (network fetch + decode + feature-extraction + tokenize + collate,
+        # everything the `for batch in train_dataloader` line triggers) or the
+        # GPU step itself (train_step: forward + backward) is the actual
+        # bottleneck - see the conversation this was added for. Reported as a
+        # rolling average over each `logging_steps` window, alongside the
+        # existing loss/LR line, so it's easy to compare against wall-clock
+        # behavior without a separate profiling run.
+        _batch_wait_time_sum = 0.0
+        _train_step_time_sum = 0.0
+        _timed_steps = 0
+        _batch_ready_at = time.time()
+
         for batch in train_dataloader:
+            _batch_wait_time_sum += time.time() - _batch_ready_at
+
             with accelerator.accumulate(student_model):
+                _step_start = time.time()
                 loss, train_metric = train_step(batch, temperature=training_args.temperature)
                 accelerator.backward(loss)
                 if accelerator.sync_gradients:
@@ -1749,6 +1765,19 @@ def main():
                 optimizer.step()
                 lr_scheduler.step()
                 optimizer.zero_grad()
+                if torch.cuda.is_available():
+                    # CUDA ops are async - without this, the "step time" below
+                    # would mostly just measure how fast we could launch
+                    # kernels, not how long the GPU actually took to run them.
+                    torch.cuda.synchronize()
+                _train_step_time_sum += time.time() - _step_start
+                _timed_steps += 1
+
+            # PATCH: reset the "waiting for next batch" clock now, so any
+            # checkpoint-saving/eval work below (rare - only at save_steps/
+            # eval_steps) gets correctly folded into the NEXT iteration's
+            # wait time rather than silently excluded from the measurement.
+            _batch_ready_at = time.time()
 
             # Check if the accelerator has performed an optimization step behind the scenes
             if accelerator.sync_gradients:
@@ -1761,6 +1790,15 @@ def main():
                         f" {train_metric['loss']}, Learning Rate:"
                         f" {lr_scheduler.get_last_lr()[0]})"
                     )
+                    if _timed_steps > 0:
+                        steps_trained_progress_bar.write(
+                            f"  [timing] avg batch_wait={_batch_wait_time_sum / _timed_steps:.3f}s "
+                            f"avg train_step={_train_step_time_sum / _timed_steps:.3f}s "
+                            f"(over last {_timed_steps} steps)"
+                        )
+                    _batch_wait_time_sum = 0.0
+                    _train_step_time_sum = 0.0
+                    _timed_steps = 0
                     log_metric(
                         accelerator,
                         metrics=train_metric,
