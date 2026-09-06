@@ -19,6 +19,7 @@ Training the Whisper model for sequence to sequence speech recognition via teach
 # You can also adapt this script for your own distillation tasks. Pointers for this are left as comments.
 
 import logging
+import json
 import math
 import os
 import re
@@ -496,6 +497,20 @@ class DataCollatorSpeechSeq2SeqWithPadding:
         return batch
 
 
+def save_loss(output_dir, step, loss, prefix):
+    """Append a logged loss, preserving existing history when resuming."""
+    path = Path(output_dir) / ("train_loss.json" if prefix == "train" else "eval_loss.json")
+    history = json.loads(path.read_text()) if path.exists() else []
+    history.append({
+        "step": step,
+        "split": prefix,
+        "loss": float(loss),
+    })
+    temporary_path = path.with_suffix(".json.tmp")
+    temporary_path.write_text(json.dumps(history, indent=2) + "\n")
+    temporary_path.replace(path)
+
+
 def log_metric(
     accelerator,
     metrics: Dict,
@@ -504,6 +519,7 @@ def log_metric(
     epoch: int,
     learning_rate: float = None,
     prefix: str = "train",
+    loss_history_dir: Optional[str] = None,
 ):
     """Helper function to log all training/evaluation metrics with the correct prefixes and styling."""
     log_metrics = {}
@@ -514,6 +530,8 @@ def log_metric(
     if learning_rate is not None:
         log_metrics[f"{prefix}/learning_rate"] = learning_rate
     accelerator.log(log_metrics, step=step)
+    if loss_history_dir is not None and accelerator.is_main_process:
+        save_loss(loss_history_dir, step, metrics["loss"], prefix)
 
 
 def log_pred(
@@ -813,6 +831,12 @@ def main():
         model_args, data_args, training_args = parser.parse_json_file(json_file=os.path.abspath(sys.argv[1]))
     else:
         model_args, data_args, training_args = parser.parse_args_into_dataclasses()
+
+    loss_history_dir = (
+        training_args.output_dir
+        if not training_args.report_to or training_args.report_to in ("none", ["none"])
+        else None
+    )
 
     # 2. Initialize the accelerator
     # We will let the accelerator handle device placement for us in this example
@@ -1828,6 +1852,7 @@ def main():
                     log_metric(
                         accelerator,
                         metrics=train_metric,
+                        loss_history_dir=loss_history_dir,
                         learning_rate=lr_scheduler.get_last_lr()[0],
                         train_time=train_time + time.time() - train_start,
                         step=cur_step,
@@ -1947,6 +1972,7 @@ def main():
                         log_metric(
                             accelerator,
                             metrics=eval_metrics,
+                            loss_history_dir=loss_history_dir,
                             train_time=eval_time,
                             step=cur_step,
                             epoch=epoch,
