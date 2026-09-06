@@ -19,6 +19,7 @@ Training the Whisper model for sequence to sequence speech recognition via teach
 # You can also adapt this script for your own distillation tasks. Pointers for this are left as comments.
 
 import logging
+import math
 import os
 import re
 import shutil
@@ -1211,6 +1212,24 @@ def main():
     use_pseudo_labels = data_args.use_pseudo_labels
     train_text_column_name = "whisper_transcript" if use_pseudo_labels else "text"
 
+    # Estimate streaming evaluation size without iterating over or decoding audio.
+    eval_sample_counts = {}
+    if training_args.do_eval and data_args.streaming:
+        for eval_split, dataset_dict in zip(all_eval_splits, dataset_names_dict):
+            split_name = dataset_dict["split"]
+            split_info = (raw_datasets[eval_split].info.splits or {}).get(split_name)
+            count = split_info.num_examples if split_info is not None else None
+            if count is None and Path(dataset_dict["name"]).is_dir():
+                # Local Parquet directories may have no DatasetInfo row counts.
+                import pyarrow.parquet as pq
+
+                files = list(Path(dataset_dict["name"]).rglob(f"{split_name}-*.parquet"))
+                if files:
+                    count = sum(pq.ParquetFile(path).metadata.num_rows for path in files)
+            if data_args.max_eval_samples is not None:
+                count = min(count, data_args.max_eval_samples) if count is not None else data_args.max_eval_samples
+            eval_sample_counts[eval_split] = count
+
     # 10.2: filter based on maximum number of training/evaluation samples
     if training_args.do_train and data_args.max_train_samples is not None:
         raw_datasets["train"] = (
@@ -1446,9 +1465,19 @@ def main():
         for idx in range(len(labels)):
             labels[idx][labels[idx] == -100] = tokenizer.pad_token_id
 
-        pred_str = tokenizer.batch_decode(preds, skip_special_tokens=True, decode_with_timestamps=return_timestamps)
-        # we do not want to group tokens when computing the metrics
-        label_str = tokenizer.batch_decode(labels, skip_special_tokens=True)
+        # Decode one sequence at a time: newer Transformers batch_decode
+        # forwards the entire list of tensors to Whisper's prompt stripping.
+        pred_str = [
+            tokenizer.decode(
+                pred.cpu().tolist(), skip_special_tokens=True,
+                decode_with_timestamps=return_timestamps, clean_up_tokenization_spaces=False,
+            )
+            for pred in preds
+        ]
+        label_str = [
+            tokenizer.decode(label.cpu().tolist(), skip_special_tokens=True, clean_up_tokenization_spaces=False)
+            for label in labels
+        ]
         wer_ortho = 100 * metric.compute(predictions=pred_str, references=label_str)
 
         # normalize everything and re-compute the WER
@@ -1849,9 +1878,19 @@ def main():
                         )
                         validation_dataloader = accelerator.prepare(validation_dataloader)
 
+                        if data_args.streaming:
+                            count = eval_sample_counts.get(eval_split)
+                            total_eval_batches = (
+                                math.ceil(count / (per_device_eval_batch_size * accelerator.num_processes))
+                                if count is not None else None
+                            )
+                        else:
+                            total_eval_batches = len(validation_dataloader)
+
                         for batch in tqdm(
                             validation_dataloader,
-                            desc=f"Evaluating {eval_split}...",
+                            total=total_eval_batches,
+                            desc=f"Evaluating {eval_split}" + (" (estimated total)" if data_args.streaming and total_eval_batches is not None else ""),
                             position=2,
                             disable=not accelerator.is_local_main_process,
                         ):
@@ -1884,15 +1923,16 @@ def main():
                             )
                             eval_metrics.update(wer_metric)
                             wer_desc = " ".join([f"Eval {key}: {value} |" for key, value in wer_metric.items()])
-                            log_pred(
-                                accelerator,
-                                pred_str,
-                                label_str,
-                                norm_pred_str,
-                                norm_label_str,
-                                step=cur_step,
-                                prefix=eval_split,
-                            )
+                            if "wandb" in training_args.report_to:
+                                log_pred(
+                                    accelerator,
+                                    pred_str,
+                                    label_str,
+                                    norm_pred_str,
+                                    norm_label_str,
+                                    step=cur_step,
+                                    prefix=eval_split,
+                                )
 
                         # Print metrics and update progress bar
                         steps_trained_progress_bar.write(
@@ -1900,8 +1940,9 @@ def main():
                             f" {wer_desc})"
                         )
 
-                        wer_l.append(wer_metric)
-                        labels_l.append(norm_label_str)
+                        if training_args.predict_with_generate:
+                            wer_l.append(wer_metric)
+                            labels_l.append(norm_label_str)
 
                         log_metric(
                             accelerator,
@@ -1915,36 +1956,38 @@ def main():
                     # flush the train metrics
                     train_start = time.time()
 
-                    # save best checkpoint
-                    numerators = [wer['wer'] * len(labs) for wer, labs in zip(wer_l, labels_l)] 
-                    val_wer = sum(numerators) / sum(len(labs) for labs in labels_l)
+                    # Best-WER checkpoints require generated predictions.
+                    if training_args.predict_with_generate:
+                        # save best checkpoint
+                        numerators = [wer['wer'] * len(labs) for wer, labs in zip(wer_l, labels_l)]
+                        val_wer = sum(numerators) / sum(len(labs) for labs in labels_l)
 
-                    if val_wer < best_val_wer:
-                        intermediate_dir = os.path.join(training_args.output_dir, f"checkpoint-{cur_step}-epoch-{epoch}-val-wer-{val_wer:.3f}")
-                        logger.info(f"Saving new best model, validation WER: {val_wer:.3f}")  
-                        accelerator.save_state(output_dir=intermediate_dir)
-                        feature_extractor.save_pretrained(intermediate_dir)
-                        tokenizer.save_pretrained(intermediate_dir)
-                        config.save_pretrained(intermediate_dir)
-                        student_model.generation_config.save_pretrained(intermediate_dir)
+                        if val_wer < best_val_wer:
+                            intermediate_dir = os.path.join(training_args.output_dir, f"checkpoint-{cur_step}-epoch-{epoch}-val-wer-{val_wer:.3f}")
+                            logger.info(f"Saving new best model, validation WER: {val_wer:.3f}")
+                            accelerator.save_state(output_dir=intermediate_dir)
+                            feature_extractor.save_pretrained(intermediate_dir)
+                            tokenizer.save_pretrained(intermediate_dir)
+                            config.save_pretrained(intermediate_dir)
+                            student_model.generation_config.save_pretrained(intermediate_dir)
 
-                        accelerator.wait_for_everyone()
+                            accelerator.wait_for_everyone()
 
-                        # remove unnecesary checkpoints, save best model and push to hub
-                        if accelerator.is_main_process:
-                            rotate_checkpoints(training_args.save_best_total_limit, output_dir=training_args.output_dir, sorting_fn=sorted_best_checkpoints)
-                            
-                            accelerator.unwrap_model(student_model).save_pretrained(training_args.output_dir)
+                            # remove unnecesary checkpoints, save best model and push to hub
+                            if accelerator.is_main_process:
+                                rotate_checkpoints(training_args.save_best_total_limit, output_dir=training_args.output_dir, sorting_fn=sorted_best_checkpoints)
 
-                            if training_args.push_to_hub:
-                                upload_folder(
-                                    folder_path=training_args.output_dir,
-                                    repo_id=repo_name,
-                                    repo_type="model",
-                                    commit_message=f"Saving best state, step {cur_step}, val wer {val_wer:.3f}",
-                                )
-                                
-                        best_val_wer = val_wer
+                                accelerator.unwrap_model(student_model).save_pretrained(training_args.output_dir)
+
+                                if training_args.push_to_hub:
+                                    upload_folder(
+                                        folder_path=training_args.output_dir,
+                                        repo_id=repo_name,
+                                        repo_type="model",
+                                        commit_message=f"Saving best state, step {cur_step}, val wer {val_wer:.3f}",
+                                    )
+
+                            best_val_wer = val_wer
 
                 # break condition
                 if cur_step == total_train_steps:
