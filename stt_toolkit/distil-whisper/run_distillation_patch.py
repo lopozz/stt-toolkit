@@ -1700,29 +1700,26 @@ def main():
         cur_step = int(match.group(1))
         epochs_trained = int(match.group(2))
 
-        logger.info("  Continuing training from checkpoint, will skip to saved global_step")
+        logger.info("  Restoring training state from checkpoint")
         logger.info(f"  Continuing training from epoch {epochs_trained}")
         logger.info(f"  Continuing training from global step {cur_step}")
 
         steps_trained_progress_bar.update(cur_step)
 
-        for epoch in range(0, epochs_trained):
-            vectorized_datasets["train"] = vectorized_datasets["train"].shuffle(training_args.seed)
-
         if not data_args.streaming and training_args.max_steps < 0:
             # we know exactly the number of steps per epoch, so can skip through the required number of batches
             resume_step = (cur_step - epochs_trained * steps_per_epoch) * gradient_accumulation_steps
         else:
-            # Currently we don't know how many steps we've taken in the current epoch
-            # So we just shuffle the dataset one extra time and start from a fresh epoch
-            # This is "good enough" for our purposes but not fully correct
+            # The checkpoint does not record the position within this data pass.
+            # Restart the pass in stored order; examples may be repeated on resume.
             resume_step = None
-            vectorized_datasets["train"] = vectorized_datasets["train"].shuffle(training_args.seed)
+            logger.warning("Data position is not restored; restarting the data pass in stored order.")
     else:
         resume_step = None
 
     for epoch in range(epochs_trained, num_epochs):
-        vectorized_datasets["train"] = vectorized_datasets["train"].shuffle(training_args.seed)
+        # Datasets are shuffled before publication. Preserve their stored order
+        # here to avoid buffering precomputed features before the first batch.
         train_dataloader = DataLoader(
             vectorized_datasets["train"],
             collate_fn=data_collator,
