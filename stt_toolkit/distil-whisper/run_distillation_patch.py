@@ -26,7 +26,7 @@ import re
 import shutil
 import sys
 import time
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from functools import partial
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
@@ -923,6 +923,22 @@ def main():
 
     # 5. Handle the repository creation
     if accelerator.is_main_process:
+        os.makedirs(training_args.output_dir, exist_ok=True)
+        # Flat arguments can be read back by this script's JSON CLI parser.
+        run_config = {**asdict(model_args), **asdict(data_args), **training_args.to_dict()}
+        argument_names = {
+            item.name for args in (model_args, data_args, training_args)
+            for item in fields(args) if item.init
+        }
+        run_config = {
+            key: value for key, value in run_config.items()
+            if key in argument_names and key != "token" and not key.endswith("_token")
+        }
+        config_path = Path(training_args.output_dir) / "run_config.json"
+        if config_path.exists():
+            shutil.copy2(config_path, config_path.with_name(f"run_config.previous-{time.time_ns()}.json"))
+        config_path.write_text(json.dumps(run_config, indent=2) + "\n")
+        logger.info("Run arguments saved to %s", config_path)
         if training_args.push_to_hub:
             if training_args.hub_model_id is None:
                 repo_name = get_full_repo_name(
@@ -1864,6 +1880,8 @@ def main():
                 if (cur_step % training_args.save_steps == 0) or cur_step == total_train_steps:
                     intermediate_dir = os.path.join(training_args.output_dir, f"checkpoint-{cur_step}-epoch-{epoch}")
                     accelerator.save_state(output_dir=intermediate_dir)
+                    if accelerator.is_main_process:
+                        shutil.copy2(Path(training_args.output_dir) / "run_config.json", Path(intermediate_dir) / "run_config.json")
                     feature_extractor.save_pretrained(intermediate_dir)
                     tokenizer.save_pretrained(intermediate_dir)
                     config.save_pretrained(intermediate_dir)
@@ -1992,6 +2010,8 @@ def main():
                             intermediate_dir = os.path.join(training_args.output_dir, f"checkpoint-{cur_step}-epoch-{epoch}-val-wer-{val_wer:.3f}")
                             logger.info(f"Saving new best model, validation WER: {val_wer:.3f}")
                             accelerator.save_state(output_dir=intermediate_dir)
+                            if accelerator.is_main_process:
+                                shutil.copy2(Path(training_args.output_dir) / "run_config.json", Path(intermediate_dir) / "run_config.json")
                             feature_extractor.save_pretrained(intermediate_dir)
                             tokenizer.save_pretrained(intermediate_dir)
                             config.save_pretrained(intermediate_dir)
