@@ -81,7 +81,9 @@ FEATURES = datasets.Features(
 )
 
 
-def resolve_zip_path(manifest_path: str, audio_zip_filepath: str) -> tuple[str, int, int]:
+def resolve_zip_path(
+    manifest_path: str, audio_zip_filepath: str
+) -> tuple[str, int, int]:
     """Map a record's `audio_zip_filepath` to (repo-relative zip path, offset, length).
 
     The zip lives under the same directory as the manifest, but not always
@@ -100,7 +102,9 @@ def resolve_zip_path(manifest_path: str, audio_zip_filepath: str) -> tuple[str, 
         raise ValueError(
             f"Could not find manifest dir {anchor!r} in audio_zip_filepath {audio_zip_filepath!r}"
         )
-    relative_suffix = cluster_path[idx + 1 :]  # e.g. "train_concatenated/00000008/00000004.zip"
+    relative_suffix = cluster_path[
+        idx + 1 :
+    ]  # e.g. "train_concatenated/00000008/00000004.zip"
     zip_path = posixpath.join(posixpath.dirname(manifest_dir), relative_suffix)
     return zip_path, int(offset), int(length)
 
@@ -224,10 +228,15 @@ def stream_pseudo_labeled(
 
     def filtered_jobs(pbar):
         for record in iter_manifest(repo_id, manifest_path):
-            if wer_threshold is not None and record.get("wer", float("inf")) >= wer_threshold:
+            if (
+                wer_threshold is not None
+                and record.get("wer", float("inf")) >= wer_threshold
+            ):
                 pbar.update(1)
                 continue
-            zip_path, offset, length = resolve_zip_path(manifest_path, record["audio_zip_filepath"])
+            zip_path, offset, length = resolve_zip_path(
+                manifest_path, record["audio_zip_filepath"]
+            )
             yield record, zip_path, offset, length
 
     def fetch_job(job):
@@ -325,11 +334,17 @@ def stream_it_multilingual(
     """
     manifests = manifests or IT_MANIFESTS
     sources = list(manifests.keys())
-    print(f"[stream_it_multilingual] interleaving sources: {sources} (stopping_strategy={stopping_strategy})")
+    print(
+        f"[stream_it_multilingual] interleaving sources: {sources} (stopping_strategy={stopping_strategy})"
+    )
 
     per_source_datasets = [
         to_iterable_dataset(
-            repo_id, manifests[name], wer_threshold=wer_threshold, source=name, max_in_flight=max_in_flight
+            repo_id,
+            manifests[name],
+            wer_threshold=wer_threshold,
+            source=name,
+            max_in_flight=max_in_flight,
         )
         for name in sources
     ]
@@ -379,10 +394,14 @@ def main():
         )
     ):
         audio = example["audio"]
-        print(f"[{i}] id={example.get('id')} duration={example.get('duration')}s wer={example.get('wer')}")
+        print(
+            f"[{i}] id={example.get('id')} duration={example.get('duration')}s wer={example.get('wer')}"
+        )
         print(f"    text:               {example.get('text')}")
         print(f"    whisper_transcript: {example.get('whisper_transcript')}")
-        print(f"    condition_on_prev:  {example.get('condition_on_prev')}  prev_text: {example.get('prev_text')!r}")
+        print(
+            f"    condition_on_prev:  {example.get('condition_on_prev')}  prev_text: {example.get('prev_text')!r}"
+        )
 
         if args.save_audio_dir:
             out_path = f"{args.save_audio_dir}/{i:03d}_{example.get('id')}.wav"

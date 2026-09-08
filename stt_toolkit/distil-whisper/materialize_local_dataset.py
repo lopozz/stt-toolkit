@@ -60,7 +60,12 @@ import shutil
 from datasets import Dataset
 from huggingface_hub import HfApi
 
-from stream_pseudo_labeled_dataset import FEATURES, IT_MANIFESTS, REPO_ID, stream_pseudo_labeled
+from stream_pseudo_labeled_dataset import (
+    FEATURES,
+    IT_MANIFESTS,
+    REPO_ID,
+    stream_pseudo_labeled,
+)
 
 
 def materialize_source(
@@ -72,7 +77,9 @@ def materialize_source(
     max_in_flight: int,
     max_samples: int | None = None,
 ) -> Dataset:
-    print(f"[materialize] starting source={source!r} (this blocks until the whole source is fetched)")
+    print(
+        f"[materialize] starting source={source!r} (this blocks until the whole source is fetched)"
+    )
     ds = Dataset.from_generator(
         stream_pseudo_labeled,
         features=FEATURES,
@@ -130,7 +137,9 @@ def parse_args():
         "'YOUR-USERNAME/it-{source}-pseudo-labeled-v0.1' -> "
         "'YOUR-USERNAME/it-mcv-pseudo-labeled-v0.1', 'YOUR-USERNAME/it-mtedx-pseudo-labeled-v0.1', etc.",
     )
-    parser.add_argument("--private", action="store_true", help="Push as private dataset repos.")
+    parser.add_argument(
+        "--private", action="store_true", help="Push as private dataset repos."
+    )
     parser.add_argument(
         "--keep-cache",
         action="store_true",
@@ -154,13 +163,17 @@ def main():
 
     unknown = set(args.sources) - set(IT_MANIFESTS)
     if unknown:
-        raise ValueError(f"Unknown source(s) {unknown}; valid choices are {list(IT_MANIFESTS)}")
+        raise ValueError(
+            f"Unknown source(s) {unknown}; valid choices are {list(IT_MANIFESTS)}"
+        )
 
     for name in args.sources:
         push_repo_id = args.push_repo_template.format(source=name)
 
         if not args.force and api.repo_exists(push_repo_id, repo_type="dataset"):
-            print(f"[materialize] skipping source={name!r} - {push_repo_id} already exists (pass --force to redo it)")
+            print(
+                f"[materialize] skipping source={name!r} - {push_repo_id} already exists (pass --force to redo it)"
+            )
             continue
 
         source_cache_dir = os.path.join(args.cache_dir, name)
@@ -178,20 +191,28 @@ def main():
         print(ds)
 
         if args.shuffle_seed is not None:
-            print(f"[materialize] shuffling source={name!r} with seed={args.shuffle_seed}")
+            print(
+                f"[materialize] shuffling source={name!r} with seed={args.shuffle_seed}"
+            )
             # Shuffle row indices, keeping audio, labels and explicit previous
             # context together. Parquet export writes this logical row order;
             # no extra full-sized flatten_indices cache is needed here.
             ds = ds.shuffle(seed=args.shuffle_seed)
 
-        print(f"[materialize] pushing source={name!r} to {push_repo_id} (private={args.private})")
+        print(
+            f"[materialize] pushing source={name!r} to {push_repo_id} (private={args.private})"
+        )
         ds.push_to_hub(push_repo_id, private=args.private)
         print(f"[materialize] push succeeded: {push_repo_id}")
 
         if args.keep_cache:
-            print(f"[materialize] --keep-cache set, leaving local cache at {source_cache_dir}")
+            print(
+                f"[materialize] --keep-cache set, leaving local cache at {source_cache_dir}"
+            )
         else:
-            print(f"[materialize] removing local cache at {source_cache_dir} (pass --keep-cache to skip this)")
+            print(
+                f"[materialize] removing local cache at {source_cache_dir} (pass --keep-cache to skip this)"
+            )
             # Drop our reference first - on Linux this isn't strictly required
             # (unlinking an open file just keeps the inode alive until the
             # last fd closes), but it's cheap insurance and avoids relying on
@@ -200,7 +221,9 @@ def main():
             try:
                 shutil.rmtree(source_cache_dir)
             except OSError as e:
-                print(f"[materialize] WARNING: failed to remove {source_cache_dir}: {e}")
+                print(
+                    f"[materialize] WARNING: failed to remove {source_cache_dir}: {e}"
+                )
 
     print("[materialize] all sources done.")
 
