@@ -26,6 +26,7 @@ import re
 import shutil
 import sys
 import time
+from datetime import datetime, timezone
 from dataclasses import asdict, dataclass, field, fields
 from functools import partial
 from pathlib import Path
@@ -939,6 +940,9 @@ def get_parameter_names(model, forbidden_layer_types, forbidden_module=None):
 
 
 def main():
+    session_started_at = datetime.now(timezone.utc).isoformat()
+    session_start = time.perf_counter()
+    session_evaluation_seconds = 0.0
     # 1. Parse input arguments
     # We keep distinct sets of args, for cleaner separation of model/data/training related args
     parser = HfArgumentParser(
@@ -2139,6 +2143,8 @@ def main():
     else:
         resume_step = None
 
+    session_start_step = cur_step
+
     for epoch in range(epochs_trained, num_epochs):
         # Datasets are shuffled before publication. Preserve their stored order
         # here to avoid buffering precomputed features before the first batch.
@@ -2282,6 +2288,7 @@ def main():
                         eval_preds = []
                         eval_labels = []
                         eval_start = time.time()
+                        evaluation_timer = time.perf_counter()
 
                         validation_dataloader = DataLoader(
                             vectorized_datasets[eval_split],
@@ -2396,6 +2403,8 @@ def main():
                             prefix=eval_split,
                         )
 
+                        session_evaluation_seconds += time.perf_counter() - evaluation_timer
+
                     # flush the train metrics
                     train_start = time.time()
 
@@ -2484,6 +2493,26 @@ def main():
             break
 
     accelerator.end_training()
+    accelerator.wait_for_everyone()
+    if accelerator.is_main_process:
+        # Keep each execution separately: a resumed run only measures time spent
+        # in this session. Earlier sessions cannot be reconstructed from checkpoints.
+        summary_path = Path(training_args.output_dir) / "run_summary.json"
+        sessions = json.loads(summary_path.read_text()) if summary_path.exists() else []
+        sessions.append({
+            "started_at": session_started_at,
+            "finished_at": datetime.now(timezone.utc).isoformat(),
+            "start_step": session_start_step,
+            "completed_steps": cur_step,
+            "steps_this_session": cur_step - session_start_step,
+            "resume_from_checkpoint": str(checkpoint) if checkpoint is not None else None,
+            "total_wall_time_seconds": time.perf_counter() - session_start,
+            "evaluation_time_seconds": session_evaluation_seconds,
+        })
+        temporary_path = summary_path.with_suffix(".json.tmp")
+        temporary_path.write_text(json.dumps(sessions, indent=2) + "\n")
+        temporary_path.replace(summary_path)
+
 
 
 if __name__ == "__main__":
