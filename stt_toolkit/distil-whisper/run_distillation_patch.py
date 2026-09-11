@@ -945,7 +945,7 @@ def prepare_train_dataset(
     teacher_feature_extractor,
     same_feature_extractor,
     sampling_rate,
-    data_args,
+    spec_augment_policy,
     train_text_column_name,
     use_pseudo_labels,
     timestamp_ids,
@@ -979,7 +979,7 @@ def prepare_train_dataset(
         )
         batch["teacher_input_features"] = teacher_inputs.input_features
 
-    if data_args.spec_augment_policy != "none":
+    if spec_augment_policy != "none":
         if feature_extractor.hop_length != teacher_feature_extractor.hop_length:
             raise ValueError(
                 "Coordinated augmentation requires matching frame spacing"
@@ -1006,7 +1006,7 @@ def prepare_train_dataset(
                 teacher_features,
                 valid_frames=valid_frames,
                 seed=seed,
-                **SPEC_AUGMENT_PRESETS[data_args.spec_augment_policy],
+                **SPEC_AUGMENT_PRESETS[spec_augment_policy],
             )
             batch["input_features"][i] = student_features
             if not same_feature_extractor:
@@ -1094,6 +1094,33 @@ def prepare_train_dataset(
         all_token_ids.append(token_ids)
 
     batch["labels"] = all_token_ids
+    return batch
+
+
+def prepare_eval_dataset(
+    batch,
+    feature_extractor,
+    teacher_feature_extractor,
+    same_feature_extractor,
+    tokenizer,
+):
+    # process audio input
+    sample = batch["audio"]
+    inputs = feature_extractor(
+        sample["array"], sampling_rate=sample["sampling_rate"]
+    )
+    batch["input_features"] = inputs.input_features[0]
+    batch["input_length"] = len(sample["array"])
+    # PATCH: separate feature extraction for the teacher (see prepare_train_dataset).
+    if not same_feature_extractor:
+        teacher_inputs = teacher_feature_extractor(
+            sample["array"], sampling_rate=sample["sampling_rate"]
+        )
+        batch["teacher_input_features"] = teacher_inputs.input_features[0]
+
+    # process targets - for evaluation these are the ground-truth transcriptions
+    input_str = batch["text"]
+    batch["labels"] = tokenizer(input_str).input_ids
     return batch
 
 
@@ -1692,7 +1719,7 @@ def main():
         teacher_feature_extractor=teacher_feature_extractor,
         same_feature_extractor=same_feature_extractor,
         sampling_rate=sampling_rate,
-        data_args=data_args,
+        spec_augment_policy=data_args.spec_augment_policy,
         train_text_column_name=train_text_column_name,
         use_pseudo_labels=use_pseudo_labels,
         timestamp_ids=timestamp_ids,
@@ -1706,25 +1733,13 @@ def main():
         tokenizer=tokenizer,
     )
 
-    def prepare_eval_dataset(batch):
-        # process audio input
-        sample = batch["audio"]
-        inputs = feature_extractor(
-            sample["array"], sampling_rate=sample["sampling_rate"]
-        )
-        batch["input_features"] = inputs.input_features[0]
-        batch["input_length"] = len(sample["array"])
-        # PATCH: separate feature extraction for the teacher (see prepare_train_dataset).
-        if not same_feature_extractor:
-            teacher_inputs = teacher_feature_extractor(
-                sample["array"], sampling_rate=sample["sampling_rate"]
-            )
-            batch["teacher_input_features"] = teacher_inputs.input_features[0]
-
-        # process targets - for evaluation these are the ground-truth transcriptions
-        input_str = batch["text"]
-        batch["labels"] = tokenizer(input_str).input_ids
-        return batch
+    prepare_eval_dataset_fn = partial(
+        prepare_eval_dataset,
+        feature_extractor=feature_extractor,
+        teacher_feature_extractor=teacher_feature_extractor,
+        same_feature_extractor=same_feature_extractor,
+        tokenizer=tokenizer,
+    )
 
     vectorized_datasets = (
         IterableDatasetDict() if data_args.streaming else DatasetDict()
@@ -1751,7 +1766,7 @@ def main():
             raw_datasets_eval_features = list(raw_datasets[eval_split].features.keys())
             map_fn_eval = partial(
                 raw_datasets[eval_split].map,
-                function=prepare_eval_dataset,
+                function=prepare_eval_dataset_fn,
                 remove_columns=raw_datasets_eval_features,
             )
             with accelerator.main_process_first():
