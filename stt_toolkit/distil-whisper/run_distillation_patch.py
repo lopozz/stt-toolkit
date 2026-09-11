@@ -939,6 +939,164 @@ def get_parameter_names(model, forbidden_layer_types, forbidden_module=None):
     return result
 
 
+def prepare_train_dataset(
+    batch,
+    feature_extractor,
+    teacher_feature_extractor,
+    same_feature_extractor,
+    sampling_rate,
+    data_args,
+    train_text_column_name,
+    use_pseudo_labels,
+    timestamp_ids,
+    timestamp_probability,
+    timestamp_begin,
+    timestamp_position,
+    condition_on_prev_probability,
+    prompt_cutoff_length,
+    max_label_length,
+    decoder_prev_token_id,
+    tokenizer,
+):
+    """
+    Pre-process the raw dataset in a three stage process:
+        1. Convert the audio arrays to log-mel spectrogram inputs
+        2. Possibly filter the timestamp tokens from the token ids (depending on the timestamp probability)
+        3. Possibly add prompt tokens if conditioning on previous text (depending on the conditioning probability)
+    """
+    # process audio input
+    audio = [sample["array"] for sample in batch["audio"]]
+    inputs = feature_extractor(audio, sampling_rate=sampling_rate)
+    batch["input_features"] = inputs.input_features
+    batch["input_length"] = [len(sample) for sample in audio]
+    # PATCH: separate feature extraction for the teacher (see the NOTE by
+    # teacher_feature_extractor's loading, a few hundred lines up) - but
+    # only when actually needed (see same_feature_extractor), to avoid
+    # paying for a second, redundant mel-spectrogram pass every example.
+    if not same_feature_extractor:
+        teacher_inputs = teacher_feature_extractor(
+            audio, sampling_rate=sampling_rate
+        )
+        batch["teacher_input_features"] = teacher_inputs.input_features
+
+    if data_args.spec_augment_policy != "none":
+        if feature_extractor.hop_length != teacher_feature_extractor.hop_length:
+            raise ValueError(
+                "Coordinated augmentation requires matching frame spacing"
+            )
+        for i, waveform in enumerate(audio):
+            student_features = batch["input_features"][i]
+            teacher_features = (
+                student_features
+                if same_feature_extractor
+                else batch["teacher_input_features"][i]
+            )
+            valid_frames = min(
+                math.ceil(len(waveform) / feature_extractor.hop_length),
+                student_features.shape[1],
+                teacher_features.shape[1],
+            )
+            # NumPy is seeded by set_seed in the main process and PyTorch
+            # in each worker; advance it per example, rather than reseeding.
+            # Resume does not restore worker RNG states or prefetched batches:
+            # exact augmentation replay after a streaming resume is not guaranteed.
+            seed = int(np.random.randint(0, 2**32, dtype=np.uint64))
+            student_features, teacher_features = spec_augment_pair(
+                student_features,
+                teacher_features,
+                valid_frames=valid_frames,
+                seed=seed,
+                **SPEC_AUGMENT_PRESETS[data_args.spec_augment_policy],
+            )
+            batch["input_features"][i] = student_features
+            if not same_feature_extractor:
+                batch["teacher_input_features"][i] = teacher_features
+
+    # process text targets - for training these are the Whisper-generated pseudo-labels
+    input_str_batched = batch[train_text_column_name]
+    condition_on_prev_batched = batch.get(
+        "condition_on_prev", len(input_str_batched) * [None]
+    )
+    # PATCH: bug fix. The original code reused `prev_ids` as the loop variable
+    # bound to condition_on_prev_batched (so, when a dataset provides its own
+    # `condition_on_prev` column, `prev_ids` started out as a raw bool). It was
+    # only ever reassigned to real token ids in two cases - random draw is
+    # False (-> None), or the dataset has NO precomputed column (-> fall back
+    # to the previous example in this same preprocessing batch). When the
+    # random draw was True AND the dataset DID have its own column, neither
+    # branch fired, so `prev_ids` stayed a bool and crashed a few lines down
+    # trying to iterate over it. Renamed the loop variable to make this
+    # explicit, and added the missing branch: use the dataset's own
+    # precomputed previous-text column when it says this row has one.
+    has_own_condition_on_prev = "condition_on_prev" in batch
+    prev_text_column = (
+        "prev_whisper_transcript" if use_pseudo_labels else "prev_text"
+    )
+    prev_text_batched = batch.get(prev_text_column, len(input_str_batched) * [None])
+
+    all_token_ids = []
+    all_token_ids_unprompted = []
+    for own_condition_on_prev, input_str, own_prev_text in zip(
+        condition_on_prev_batched, input_str_batched, prev_text_batched
+    ):
+        token_ids = tokenizer(
+            input_str, add_special_tokens=not use_pseudo_labels
+        ).input_ids
+
+        # check whether we have timestamps in the PLs and filter if required
+        has_timestamps = len(set(token_ids) & set(timestamp_ids)) > 0
+        if has_timestamps:
+            # sample from binomial distribution to get probability of training on timestamps
+            predict_timestamps = bool(np.random.binomial(1, timestamp_probability))
+            if not predict_timestamps:
+                # filter timestamps and insert the <|notimestamps|> task token
+                token_ids = [
+                    token for token in token_ids if token < timestamp_begin
+                ]
+                token_ids.insert(timestamp_position, timestamp_begin)
+
+        all_token_ids_unprompted.append(token_ids)
+        # check whether to condition on previous text - we do this with probability condition_on_prev_probability
+        condition_on_prev = bool(
+            np.random.binomial(1, condition_on_prev_probability)
+        )
+        prev_ids = None
+        if condition_on_prev:
+            if has_own_condition_on_prev:
+                # PATCH: use the dataset's own precomputed grouping - only if
+                # this row's own flag says it genuinely has valid prior context.
+                if own_condition_on_prev and own_prev_text:
+                    prev_ids = tokenizer(
+                        own_prev_text, add_special_tokens=not use_pseudo_labels
+                    ).input_ids
+            elif len(all_token_ids_unprompted) > 1:
+                # prompt ids are the penultimate token ids in the batch
+                prev_ids = all_token_ids_unprompted[-2]
+
+        if prev_ids is not None:
+            if has_timestamps and not predict_timestamps:
+                # filter timestamp ids from prompt when not predicting timestamps
+                prev_ids = [token for token in prev_ids if token < timestamp_begin]
+
+            # check that the length of the prompt does not exceed more than half the max label length (224)
+            if len(prev_ids) > prompt_cutoff_length:
+                prev_ids = prev_ids[-prompt_cutoff_length + 1 :]
+
+            # and that the total length of the labels does not exceed the max label length (448)
+            if len(prev_ids + token_ids) + 1 > max_label_length:
+                trim_length = len(token_ids) - max_label_length + 1
+                prev_ids = prev_ids[trim_length:]
+
+            prev_ids = [decoder_prev_token_id] + prev_ids
+
+            token_ids = prev_ids + token_ids
+
+        all_token_ids.append(token_ids)
+
+    batch["labels"] = all_token_ids
+    return batch
+
+
 def main():
     session_started_at = datetime.now(timezone.utc).isoformat()
     session_start = time.perf_counter()
@@ -1528,144 +1686,25 @@ def main():
             )
 
     # 10.4: pre-process training/evaluation datasets
-    def prepare_train_dataset(batch):
-        """
-        Pre-process the raw dataset in a three stage process:
-            1. Convert the audio arrays to log-mel spectrogram inputs
-            2. Possibly filter the timestamp tokens from the token ids (depending on the timestamp probability)
-            3. Possibly add prompt tokens if conditioning on previous text (depending on the conditioning probability)
-        """
-        # process audio input
-        audio = [sample["array"] for sample in batch["audio"]]
-        inputs = feature_extractor(audio, sampling_rate=sampling_rate)
-        batch["input_features"] = inputs.input_features
-        batch["input_length"] = [len(sample) for sample in audio]
-        # PATCH: separate feature extraction for the teacher (see the NOTE by
-        # teacher_feature_extractor's loading, a few hundred lines up) - but
-        # only when actually needed (see same_feature_extractor), to avoid
-        # paying for a second, redundant mel-spectrogram pass every example.
-        if not same_feature_extractor:
-            teacher_inputs = teacher_feature_extractor(
-                audio, sampling_rate=sampling_rate
-            )
-            batch["teacher_input_features"] = teacher_inputs.input_features
-
-        if data_args.spec_augment_policy != "none":
-            if feature_extractor.hop_length != teacher_feature_extractor.hop_length:
-                raise ValueError(
-                    "Coordinated augmentation requires matching frame spacing"
-                )
-            for i, waveform in enumerate(audio):
-                student_features = batch["input_features"][i]
-                teacher_features = (
-                    student_features
-                    if same_feature_extractor
-                    else batch["teacher_input_features"][i]
-                )
-                valid_frames = min(
-                    math.ceil(len(waveform) / feature_extractor.hop_length),
-                    student_features.shape[1],
-                    teacher_features.shape[1],
-                )
-                # NumPy is seeded by set_seed in the main process and PyTorch
-                # in each worker; advance it per example, rather than reseeding.
-                # Resume does not restore worker RNG states or prefetched batches:
-                # exact augmentation replay after a streaming resume is not guaranteed.
-                seed = int(np.random.randint(0, 2**32, dtype=np.uint64))
-                student_features, teacher_features = spec_augment_pair(
-                    student_features,
-                    teacher_features,
-                    valid_frames=valid_frames,
-                    seed=seed,
-                    **SPEC_AUGMENT_PRESETS[data_args.spec_augment_policy],
-                )
-                batch["input_features"][i] = student_features
-                if not same_feature_extractor:
-                    batch["teacher_input_features"][i] = teacher_features
-
-        # process text targets - for training these are the Whisper-generated pseudo-labels
-        input_str_batched = batch[train_text_column_name]
-        condition_on_prev_batched = batch.get(
-            "condition_on_prev", len(input_str_batched) * [None]
-        )
-        # PATCH: bug fix. The original code reused `prev_ids` as the loop variable
-        # bound to condition_on_prev_batched (so, when a dataset provides its own
-        # `condition_on_prev` column, `prev_ids` started out as a raw bool). It was
-        # only ever reassigned to real token ids in two cases - random draw is
-        # False (-> None), or the dataset has NO precomputed column (-> fall back
-        # to the previous example in this same preprocessing batch). When the
-        # random draw was True AND the dataset DID have its own column, neither
-        # branch fired, so `prev_ids` stayed a bool and crashed a few lines down
-        # trying to iterate over it. Renamed the loop variable to make this
-        # explicit, and added the missing branch: use the dataset's own
-        # precomputed previous-text column when it says this row has one.
-        has_own_condition_on_prev = "condition_on_prev" in batch
-        prev_text_column = (
-            "prev_whisper_transcript" if use_pseudo_labels else "prev_text"
-        )
-        prev_text_batched = batch.get(prev_text_column, len(input_str_batched) * [None])
-
-        all_token_ids = []
-        all_token_ids_unprompted = []
-        for own_condition_on_prev, input_str, own_prev_text in zip(
-            condition_on_prev_batched, input_str_batched, prev_text_batched
-        ):
-            token_ids = tokenizer(
-                input_str, add_special_tokens=not use_pseudo_labels
-            ).input_ids
-
-            # check whether we have timestamps in the PLs and filter if required
-            has_timestamps = len(set(token_ids) & set(timestamp_ids)) > 0
-            if has_timestamps:
-                # sample from binomial distribution to get probability of training on timestamps
-                predict_timestamps = bool(np.random.binomial(1, timestamp_probability))
-                if not predict_timestamps:
-                    # filter timestamps and insert the <|notimestamps|> task token
-                    token_ids = [
-                        token for token in token_ids if token < timestamp_begin
-                    ]
-                    token_ids.insert(timestamp_position, timestamp_begin)
-
-            all_token_ids_unprompted.append(token_ids)
-            # check whether to condition on previous text - we do this with probability condition_on_prev_probability
-            condition_on_prev = bool(
-                np.random.binomial(1, condition_on_prev_probability)
-            )
-            prev_ids = None
-            if condition_on_prev:
-                if has_own_condition_on_prev:
-                    # PATCH: use the dataset's own precomputed grouping - only if
-                    # this row's own flag says it genuinely has valid prior context.
-                    if own_condition_on_prev and own_prev_text:
-                        prev_ids = tokenizer(
-                            own_prev_text, add_special_tokens=not use_pseudo_labels
-                        ).input_ids
-                elif len(all_token_ids_unprompted) > 1:
-                    # prompt ids are the penultimate token ids in the batch
-                    prev_ids = all_token_ids_unprompted[-2]
-
-            if prev_ids is not None:
-                if has_timestamps and not predict_timestamps:
-                    # filter timestamp ids from prompt when not predicting timestamps
-                    prev_ids = [token for token in prev_ids if token < timestamp_begin]
-
-                # check that the length of the prompt does not exceed more than half the max label length (224)
-                if len(prev_ids) > prompt_cutoff_length:
-                    prev_ids = prev_ids[-prompt_cutoff_length + 1 :]
-
-                # and that the total length of the labels does not exceed the max label length (448)
-                if len(prev_ids + token_ids) + 1 > max_label_length:
-                    trim_length = len(token_ids) - max_label_length + 1
-                    prev_ids = prev_ids[trim_length:]
-
-                prev_ids = [decoder_prev_token_id] + prev_ids
-
-                token_ids = prev_ids + token_ids
-
-            all_token_ids.append(token_ids)
-
-        batch["labels"] = all_token_ids
-        return batch
+    prepare_train_dataset_fn = partial(
+        prepare_train_dataset,
+        feature_extractor=feature_extractor,
+        teacher_feature_extractor=teacher_feature_extractor,
+        same_feature_extractor=same_feature_extractor,
+        sampling_rate=sampling_rate,
+        data_args=data_args,
+        train_text_column_name=train_text_column_name,
+        use_pseudo_labels=use_pseudo_labels,
+        timestamp_ids=timestamp_ids,
+        timestamp_probability=timestamp_probability,
+        timestamp_begin=timestamp_begin,
+        timestamp_position=timestamp_position,
+        condition_on_prev_probability=condition_on_prev_probability,
+        prompt_cutoff_length=prompt_cutoff_length,
+        max_label_length=max_label_length,
+        decoder_prev_token_id=decoder_prev_token_id,
+        tokenizer=tokenizer,
+    )
 
     def prepare_eval_dataset(batch):
         # process audio input
@@ -1696,7 +1735,7 @@ def main():
         # We gate the pre-processing function accordingly
         map_fn_train = partial(
             raw_datasets["train"].map,
-            function=prepare_train_dataset,
+            function=prepare_train_dataset_fn,
             remove_columns=raw_datasets_train_features,
             batched=True,
             batch_size=data_args.preprocessing_batch_size,
