@@ -36,13 +36,11 @@ import torch.nn as nn
 from typing import Any
 from pathlib import Path
 from functools import partial
-from collections import deque
 from accelerate import Accelerator
 from accelerate.utils import set_seed
 from datetime import datetime, timezone
 from accelerate.logging import get_logger
 from transformers.utils import check_min_version
-from concurrent.futures import ThreadPoolExecutor
 from transformers.utils.versions import require_version
 from dataclasses import asdict, dataclass, field, fields
 from transformers.modeling_outputs import BaseModelOutput
@@ -2240,35 +2238,6 @@ def main():
 
     session_start_step = cur_step
 
-    def prefetch_iter(dataloader, num_prefetch=2):
-        it = iter(dataloader)
-        executor = ThreadPoolExecutor(
-            max_workers=1
-        )  # single worker: fetch is sequential either way
-        pending = deque()
-
-        def _next():
-            try:
-                return next(it)
-            except StopIteration:
-                return None
-
-        # prime the pipeline
-        for _ in range(num_prefetch):
-            pending.append(executor.submit(_next))
-
-        while pending:
-            batch = pending.popleft().result()
-            if batch is None:
-                executor.shutdown(wait=False)
-                return
-            pending.append(
-                executor.submit(_next)
-            )  # kick off the next fetch immediately
-            yield batch
-
-        executor.shutdown(wait=False)
-
     for epoch in range(epochs_trained, num_epochs):
         # Datasets are shuffled before publication. Preserve their stored order
         # here to avoid buffering precomputed features before the first batch.
@@ -2306,7 +2275,7 @@ def main():
         _timed_steps = 0
         _batch_ready_at = time.time()
 
-        for batch in prefetch_iter(train_dataloader, num_prefetch=2):
+        for batch in train_dataloader:
             _batch_wait_time_sum += time.time() - _batch_ready_at
 
             with accelerator.accumulate(student_model):
