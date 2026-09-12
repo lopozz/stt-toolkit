@@ -54,7 +54,9 @@ _original_load_dataset = rd.load_dataset
 
 def _patched_load_dataset(path, name=None, split="train", streaming=True, **kwargs):
     if path != SENTINEL_NAME:
-        return _original_load_dataset(path, name, split=split, streaming=streaming, **kwargs)
+        return _original_load_dataset(
+            path, name, split=split, streaming=streaming, **kwargs
+        )
 
     if not streaming:
         raise ValueError(
@@ -62,16 +64,24 @@ def _patched_load_dataset(path, name=None, split="train", streaming=True, **kwar
             "the underlying sources are far too large (~784GB for Italian alone) to load non-streaming."
         )
 
-    print(f"[_patched_load_dataset] building streaming dataset for split={split!r} (wer_threshold={WER_THRESHOLD})")
+    print(
+        f"[_patched_load_dataset] building streaming dataset for split={split!r} (wer_threshold={WER_THRESHOLD})"
+    )
 
     # Rebuilding this per call keeps train/eval disjoint: both start from the
     # same deterministic interleaving order (fixed seed), so skip/take never overlap.
-    full = stream_it_multilingual(wer_threshold=WER_THRESHOLD, max_in_flight=MAX_IN_FLIGHT)
+    full = stream_it_multilingual(
+        wer_threshold=WER_THRESHOLD, max_in_flight=MAX_IN_FLIGHT
+    )
 
     if split == "train":
-        print(f"[_patched_load_dataset] split=train -> skipping first {EVAL_HOLDOUT_SIZE} interleaved examples")
+        print(
+            f"[_patched_load_dataset] split=train -> skipping first {EVAL_HOLDOUT_SIZE} interleaved examples"
+        )
         return full.skip(EVAL_HOLDOUT_SIZE)
-    print(f"[_patched_load_dataset] split={split} -> taking first {EVAL_HOLDOUT_SIZE} interleaved examples")
+    print(
+        f"[_patched_load_dataset] split={split} -> taking first {EVAL_HOLDOUT_SIZE} interleaved examples"
+    )
     return full.take(EVAL_HOLDOUT_SIZE)
 
 

@@ -19,15 +19,20 @@ Training the Whisper model for sequence to sequence speech recognition via teach
 # You can also adapt this script for your own distillation tasks. Pointers for this are left as comments.
 
 import logging
+import json
+import math
 import os
 import re
 import shutil
 import sys
 import time
-from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from dataclasses import asdict, dataclass, field, fields
 from functools import partial
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
+
+from spec_augment import SPEC_AUGMENT_PRESETS, spec_augment_pair
 
 import datasets
 import evaluate
@@ -58,10 +63,13 @@ from transformers import (
     WhisperForConditionalGeneration,
     WhisperProcessor,
     WhisperTokenizerFast,
-    get_scheduler
+    get_scheduler,
 )
 from transformers.modeling_outputs import BaseModelOutput
-from transformers.models.whisper.english_normalizer import BasicTextNormalizer, EnglishTextNormalizer
+from transformers.models.whisper.english_normalizer import (
+    BasicTextNormalizer,
+    EnglishTextNormalizer,
+)
 from transformers.utils import check_min_version
 from transformers.utils.versions import require_version
 
@@ -81,34 +89,50 @@ class ModelArguments:
     """
 
     model_name_or_path: str = field(
-        metadata={"help": "Path to pretrained Whisper model or model identifier from huggingface.co/models"}
+        metadata={
+            "help": "Path to pretrained Whisper model or model identifier from huggingface.co/models"
+        }
     )
     teacher_model_name_or_path: str = field(
-        metadata={"help": "Path to pretrained teacher model or model identifier from huggingface.co/models"}
+        metadata={
+            "help": "Path to pretrained teacher model or model identifier from huggingface.co/models"
+        }
     )
     config_name: Optional[str] = field(
         default=None,
-        metadata={"help": "Pretrained config name or path if not the same as model_name"},
+        metadata={
+            "help": "Pretrained config name or path if not the same as model_name"
+        },
     )
     tokenizer_name: Optional[str] = field(
         default=None,
-        metadata={"help": "Pretrained tokenizer name or path if not the same as model_name"},
+        metadata={
+            "help": "Pretrained tokenizer name or path if not the same as model_name"
+        },
     )
     feature_extractor_name: Optional[str] = field(
         default=None,
-        metadata={"help": "feature extractor name or path if not the same as model_name"},
+        metadata={
+            "help": "feature extractor name or path if not the same as model_name"
+        },
     )
     cache_dir: Optional[str] = field(
         default=None,
-        metadata={"help": "Where to store the pretrained models downloaded from huggingface.co"},
+        metadata={
+            "help": "Where to store the pretrained models downloaded from huggingface.co"
+        },
     )
     use_fast_tokenizer: bool = field(
         default=True,
-        metadata={"help": "Whether to use one of the fast tokenizer (backed by the tokenizers library) or not."},
+        metadata={
+            "help": "Whether to use one of the fast tokenizer (backed by the tokenizers library) or not."
+        },
     )
     model_revision: str = field(
         default="main",
-        metadata={"help": "The specific model version to use (can be a branch name, tag name or commit id)."},
+        metadata={
+            "help": "The specific model version to use (can be a branch name, tag name or commit id)."
+        },
     )
     subfolder: str = field(
         default="",
@@ -162,6 +186,12 @@ class DataTrainingArguments:
             "and Common Voice, set `train_dataset_name='librispeech_asr+common_voice'`."
         },
     )
+    spec_augment_policy: str = field(
+        default="none",
+        metadata={
+            "help": "Training augmentation: none, lb_no_warp, ld_no_warp, lb, ld."
+        },
+    )
     train_dataset_config_name: Optional[str] = field(
         default=None,
         metadata={
@@ -204,11 +234,15 @@ class DataTrainingArguments:
     )
     preprocessing_num_workers: Optional[int] = field(
         default=None,
-        metadata={"help": "The number of processes to use for the preprocessing if using non-streaming mode."},
+        metadata={
+            "help": "The number of processes to use for the preprocessing if using non-streaming mode."
+        },
     )
     preprocessing_batch_size: Optional[int] = field(
         default=256,
-        metadata={"help": "Number of examples per batch provided to the `prepare_dataset` function."},
+        metadata={
+            "help": "Number of examples per batch provided to the `prepare_dataset` function."
+        },
     )
     max_train_samples: Optional[int] = field(
         default=None,
@@ -228,27 +262,41 @@ class DataTrainingArguments:
     )
     audio_column_name: str = field(
         default="audio",
-        metadata={"help": "The name of the dataset column containing the audio data. Defaults to 'audio'"},
+        metadata={
+            "help": "The name of the dataset column containing the audio data. Defaults to 'audio'"
+        },
     )
     text_column_name: str = field(
         default=None,
-        metadata={"help": "The name of the dataset column containing the text data in the training set."},
+        metadata={
+            "help": "The name of the dataset column containing the text data in the training set."
+        },
     )
     eval_text_column_name: str = field(
         default="text",
-        metadata={"help": ("The name of the dataset column containing the text data in the evaluation set.")},
+        metadata={
+            "help": (
+                "The name of the dataset column containing the text data in the evaluation set."
+            )
+        },
     )
     max_duration_in_seconds: float = field(
         default=30.0,
-        metadata={"help": "Filter audio files that are longer than `max_duration_in_seconds` seconds"},
+        metadata={
+            "help": "Filter audio files that are longer than `max_duration_in_seconds` seconds"
+        },
     )
     min_duration_in_seconds: float = field(
         default=0.0,
-        metadata={"help": "Filter audio files that are shorter than `min_duration_in_seconds` seconds"},
+        metadata={
+            "help": "Filter audio files that are shorter than `min_duration_in_seconds` seconds"
+        },
     )
     max_label_length: int = field(
         default=448,
-        metadata={"help": "Truncate transcriptions that are longer `max_label_length` tokens."},
+        metadata={
+            "help": "Truncate transcriptions that are longer `max_label_length` tokens."
+        },
     )
     pad_target_to_multiple_of: Optional[int] = field(
         default=None,
@@ -289,7 +337,9 @@ class DataTrainingArguments:
     )
     streaming: bool = field(
         default=True,
-        metadata={"help": "Whether to use Datasets' streaming mode to load and pre-process the data."},
+        metadata={
+            "help": "Whether to use Datasets' streaming mode to load and pre-process the data."
+        },
     )
     wer_threshold: float = field(
         default=None,
@@ -309,13 +359,20 @@ class DataTrainingArguments:
         },
     )
     timestamp_probability: float = field(
-        default=0.2, metadata={"help": "Probability for training on timestamped tokens if the data contains it."}
+        default=0.2,
+        metadata={
+            "help": "Probability for training on timestamped tokens if the data contains it."
+        },
     )
     condition_on_prev_probability: float = field(
-        default=0.2, metadata={"help": "Probability for conditioning on the previous text example."}
+        default=0.2,
+        metadata={"help": "Probability for conditioning on the previous text example."},
     )
     return_timestamps: bool = field(
-        default=False, metadata={"help": "Whether or not to predict timestamps in the generation step."}
+        default=False,
+        metadata={
+            "help": "Whether or not to predict timestamps in the generation step."
+        },
     )
     language: str = field(
         default=None,
@@ -371,7 +428,10 @@ class DistillationTrainingArguments(Seq2SeqTrainingArguments):
         metadata={"help": "Whether to freeze the decoder embedding positions."},
     )
     temperature: Optional[float] = field(
-        default=2.0, metadata={"help": "Temperature to anneal the logits when computing the softmax."}
+        default=2.0,
+        metadata={
+            "help": "Temperature to anneal the logits when computing the softmax."
+        },
     )
     kl_weight: Optional[float] = field(
         default=1.0,
@@ -392,12 +452,7 @@ class DistillationTrainingArguments(Seq2SeqTrainingArguments):
         },
     )
     save_best_total_limit: Optional[int] = field(
-        default=1,
-        metadata={
-            "help": (
-                "Number of best models to be saved."
-            )
-        }
+        default=1, metadata={"help": ("Number of best models to be saved.")}
     )
 
 
@@ -434,13 +489,20 @@ class DataCollatorSpeechSeq2SeqWithPadding:
     input_padding: Union[bool, str] = "max_length"
     target_padding: Union[bool, str] = "max_length"
     max_target_length: Optional[int] = None
+    # PATCH: the teacher's own feature extractor, used to pad `teacher_input_features`
+    # (see the NOTE on teacher_feature_extractor's loading in main()).
+    teacher_feature_extractor: Any = None
 
-    def __call__(self, features: List[Dict[str, Union[List[int], np.ndarray]]]) -> Dict[str, np.ndarray]:
+    def __call__(
+        self, features: List[Dict[str, Union[List[int], np.ndarray]]]
+    ) -> Dict[str, np.ndarray]:
         # split inputs and labels since they have to be of different lengths and need
         # different padding methods
 
         # dataloader returns a list of features which we convert to a dict
-        input_features = {"input_features": [feature["input_features"] for feature in features]}
+        input_features = {
+            "input_features": [feature["input_features"] for feature in features]
+        }
         label_features = {"input_ids": [feature["labels"] for feature in features]}
 
         # reformat list to dict and set to pytorch format
@@ -449,6 +511,25 @@ class DataCollatorSpeechSeq2SeqWithPadding:
             padding=self.input_padding,
             return_tensors="pt",
         )
+
+        # PATCH: pad the teacher's separately-extracted features the same way,
+        # using the teacher's own feature extractor (only present/needed when
+        # student and teacher don't share one - see teacher_feature_extractor).
+        if (
+            self.teacher_feature_extractor is not None
+            and "teacher_input_features" in features[0]
+        ):
+            teacher_input_features = {
+                "input_features": [
+                    feature["teacher_input_features"] for feature in features
+                ]
+            }
+            teacher_batch = self.teacher_feature_extractor.pad(
+                teacher_input_features,
+                padding=self.input_padding,
+                return_tensors="pt",
+            )
+            batch["teacher_input_features"] = teacher_batch["input_features"]
 
         labels_batch = self.processor.tokenizer.pad(
             label_features,
@@ -478,6 +559,27 @@ class DataCollatorSpeechSeq2SeqWithPadding:
         return batch
 
 
+def save_loss(output_dir, step, loss, prefix, learning_rate=None):
+    """Append a logged loss, preserving existing history when resuming."""
+    path = Path(output_dir) / (
+        "train_loss.json" if prefix == "train" else "eval_loss.json"
+    )
+    history = json.loads(path.read_text()) if path.exists() else []
+    history.append(
+        {
+            "step": step,
+            "split": prefix,
+            "loss": float(loss),
+            "learning_rate": float(learning_rate)
+            if learning_rate is not None
+            else None,
+        }
+    )
+    temporary_path = path.with_suffix(".json.tmp")
+    temporary_path.write_text(json.dumps(history, indent=2) + "\n")
+    temporary_path.replace(path)
+
+
 def log_metric(
     accelerator,
     metrics: Dict,
@@ -486,6 +588,7 @@ def log_metric(
     epoch: int,
     learning_rate: float = None,
     prefix: str = "train",
+    loss_history_dir: Optional[str] = None,
 ):
     """Helper function to log all training/evaluation metrics with the correct prefixes and styling."""
     log_metrics = {}
@@ -496,6 +599,8 @@ def log_metric(
     if learning_rate is not None:
         log_metrics[f"{prefix}/learning_rate"] = learning_rate
     accelerator.log(log_metrics, step=step)
+    if loss_history_dir is not None and accelerator.is_main_process:
+        save_loss(loss_history_dir, step, metrics["loss"], prefix, learning_rate)
 
 
 def log_pred(
@@ -516,7 +621,10 @@ def log_pred(
         prefix_pretty = prefix.replace("/", "-")
 
         # convert str data to a wandb compatible format
-        str_data = [[label_str[i], pred_str[i], norm_label_str[i], norm_pred_str[i]] for i in range(len(pred_str))]
+        str_data = [
+            [label_str[i], pred_str[i], norm_label_str[i], norm_pred_str[i]]
+            for i in range(len(pred_str))
+        ]
         # log as a table with the appropriate headers
         wandb_tracker.log_table(
             table_name=f"predictions/{prefix_pretty}-step-{cur_step_pretty}",
@@ -552,13 +660,23 @@ def convert_dataset_str_to_list(
     """
     if isinstance(dataset_names, str):
         dataset_names = dataset_names.split("+")
-        dataset_config_names = dataset_config_names.split("+") if dataset_config_names is not None else None
+        dataset_config_names = (
+            dataset_config_names.split("+")
+            if dataset_config_names is not None
+            else None
+        )
         splits = splits.split("+") if splits is not None else None
-        text_column_names = text_column_names.split("+") if text_column_names is not None else None
-        dataset_samples = dataset_samples.split("+") if dataset_samples is not None else None
+        text_column_names = (
+            text_column_names.split("+") if text_column_names is not None else None
+        )
+        dataset_samples = (
+            dataset_samples.split("+") if dataset_samples is not None else None
+        )
 
     # basic checks to ensure we've got the right number of datasets/configs/splits/columns/probs
-    if dataset_config_names is not None and len(dataset_names) != len(dataset_config_names):
+    if dataset_config_names is not None and len(dataset_names) != len(
+        dataset_config_names
+    ):
         raise ValueError(
             f"Ensure one config is passed for each dataset, got {len(dataset_names)} datasets and"
             f" {len(dataset_config_names)} configs."
@@ -586,12 +704,20 @@ def convert_dataset_str_to_list(
         dataset_samples = [None] * len(dataset_names)
 
     dataset_config_names = (
-        dataset_config_names if dataset_config_names is not None else ["default" for _ in range(len(dataset_names))]
+        dataset_config_names
+        if dataset_config_names is not None
+        else ["default" for _ in range(len(dataset_names))]
     )
     text_column_names = (
-        text_column_names if text_column_names is not None else ["text" for _ in range(len(dataset_names))]
+        text_column_names
+        if text_column_names is not None
+        else ["text" for _ in range(len(dataset_names))]
     )
-    splits = splits if splits is not None else [default_split for _ in range(len(dataset_names))]
+    splits = (
+        splits
+        if splits is not None
+        else [default_split for _ in range(len(dataset_names))]
+    )
 
     dataset_names_dict = []
     for i, ds_name in enumerate(dataset_names):
@@ -636,7 +762,9 @@ def load_multiple_datasets(
     for dataset_dict in tqdm(
         dataset_names_dict,
         desc="Combining datasets...",
-        disable=not accelerator.is_local_main_process if accelerator is not None else False,
+        disable=not accelerator.is_local_main_process
+        if accelerator is not None
+        else False,
     ):
         dataset = load_dataset(
             dataset_dict["name"],
@@ -672,6 +800,14 @@ def load_multiple_datasets(
 
         if "condition_on_prev" in dataset_features:
             columns_to_keep.add("condition_on_prev")
+            # PATCH: also keep whichever precomputed previous-text column matches
+            # what we're actually training on, so prepare_train_dataset() can use
+            # it (see PATCH note there) instead of just the boolean flag alone.
+            prev_text_column = (
+                "prev_whisper_transcript" if use_pseudo_labels else "prev_text"
+            )
+            if prev_text_column in dataset_features:
+                columns_to_keep.add(prev_text_column)
 
         dataset_features = dataset.features.keys()
         dataset = dataset.remove_columns(set(dataset_features - columns_to_keep))
@@ -698,8 +834,14 @@ def sorted_checkpoints(output_dir=None, checkpoint_prefix="checkpoint") -> List[
     """Helper function to sort saved checkpoints from oldest to newest."""
     ordering_and_checkpoint_path = []
 
-    glob_checkpoints = [str(x) for x in Path(output_dir).glob(f"{checkpoint_prefix}-*") if os.path.isdir(x)]
-    glob_checkpoints = [path for path in glob_checkpoints if "val-wer" not in path]  # filter out best model checkpoints
+    glob_checkpoints = [
+        str(x)
+        for x in Path(output_dir).glob(f"{checkpoint_prefix}-*")
+        if os.path.isdir(x)
+    ]
+    glob_checkpoints = [
+        path for path in glob_checkpoints if "val-wer" not in path
+    ]  # filter out best model checkpoints
 
     for path in glob_checkpoints:
         regex_match = re.match(f".*{checkpoint_prefix}-([0-9]+)", path)
@@ -715,7 +857,11 @@ def sorted_best_checkpoints(output_dir=None, checkpoint_prefix="checkpoint"):
     """Helper function to sort saved best checkpoints."""
     ordering_and_checkpoint_path = []
 
-    glob_checkpoints = [str(x) for x in Path(output_dir).glob(f"{checkpoint_prefix}-*") if os.path.isdir(x)]
+    glob_checkpoints = [
+        str(x)
+        for x in Path(output_dir).glob(f"{checkpoint_prefix}-*")
+        if os.path.isdir(x)
+    ]
     for path in glob_checkpoints:
         regex_match = re.search(r"val-wer-([0-9]+\.[0-9]+)", path)
         if regex_match is not None and regex_match.groups() is not None:
@@ -726,12 +872,19 @@ def sorted_best_checkpoints(output_dir=None, checkpoint_prefix="checkpoint"):
     return checkpoints_sorted
 
 
-def rotate_checkpoints(save_total_limit=None, output_dir=None, checkpoint_prefix="checkpoint", sorting_fn=sorted_checkpoints) -> None:
+def rotate_checkpoints(
+    save_total_limit=None,
+    output_dir=None,
+    checkpoint_prefix="checkpoint",
+    sorting_fn=sorted_checkpoints,
+) -> None:
     """Helper function to delete old checkpoints."""
     if save_total_limit is None or save_total_limit <= 0:
         return
     # Check if we should delete older checkpoint(s)
-    checkpoints_sorted = sorting_fn(output_dir=output_dir, checkpoint_prefix=checkpoint_prefix)
+    checkpoints_sorted = sorting_fn(
+        output_dir=output_dir, checkpoint_prefix=checkpoint_prefix
+    )
     if len(checkpoints_sorted) <= save_total_limit:
         return
 
@@ -750,11 +903,15 @@ def get_last_checkpoint(folder):
     checkpoints = [
         path
         for path in content
-        if _RE_CHECKPOINT.search(path) is not None and os.path.isdir(os.path.join(folder, path))
+        if _RE_CHECKPOINT.search(path) is not None
+        and os.path.isdir(os.path.join(folder, path))
     ]
     if len(checkpoints) == 0:
         return
-    return os.path.join(folder, max(checkpoints, key=lambda x: int(_RE_CHECKPOINT.search(x).groups()[0])))
+    return os.path.join(
+        folder,
+        max(checkpoints, key=lambda x: int(_RE_CHECKPOINT.search(x).groups()[0])),
+    )
 
 
 def get_parameter_names(model, forbidden_layer_types, forbidden_module=None):
@@ -770,7 +927,11 @@ def get_parameter_names(model, forbidden_layer_types, forbidden_module=None):
             for n in get_parameter_names(child, forbidden_layer_types, forbidden_module)
             if not (
                 isinstance(child, tuple(forbidden_layer_types))
-                or (child in tuple(forbidden_module) if forbidden_module is not None else False)
+                or (
+                    child in tuple(forbidden_module)
+                    if forbidden_module is not None
+                    else False
+                )
             )
         ]
     # Add model specific parameters (defined with nn.Parameter) since they are not in any child.
@@ -778,17 +939,353 @@ def get_parameter_names(model, forbidden_layer_types, forbidden_module=None):
     return result
 
 
+def prepare_train_dataset(
+    batch,
+    feature_extractor,
+    teacher_feature_extractor,
+    same_feature_extractor,
+    sampling_rate,
+    spec_augment_policy,
+    train_text_column_name,
+    use_pseudo_labels,
+    timestamp_ids,
+    timestamp_probability,
+    timestamp_begin,
+    timestamp_position,
+    condition_on_prev_probability,
+    prompt_cutoff_length,
+    max_label_length,
+    decoder_prev_token_id,
+    tokenizer,
+):
+    """
+    Pre-process the raw dataset in a three stage process:
+        1. Convert the audio arrays to log-mel spectrogram inputs
+        2. Possibly filter the timestamp tokens from the token ids (depending on the timestamp probability)
+        3. Possibly add prompt tokens if conditioning on previous text (depending on the conditioning probability)
+    """
+    # process audio input
+    audio = [sample["array"] for sample in batch["audio"]]
+    inputs = feature_extractor(audio, sampling_rate=sampling_rate)
+    batch["input_features"] = inputs.input_features
+    batch["input_length"] = [len(sample) for sample in audio]
+    # PATCH: separate feature extraction for the teacher (see the NOTE by
+    # teacher_feature_extractor's loading, a few hundred lines up) - but
+    # only when actually needed (see same_feature_extractor), to avoid
+    # paying for a second, redundant mel-spectrogram pass every example.
+    if not same_feature_extractor:
+        teacher_inputs = teacher_feature_extractor(
+            audio, sampling_rate=sampling_rate
+        )
+        batch["teacher_input_features"] = teacher_inputs.input_features
+
+    if spec_augment_policy != "none":
+        if feature_extractor.hop_length != teacher_feature_extractor.hop_length:
+            raise ValueError(
+                "Coordinated augmentation requires matching frame spacing"
+            )
+        for i, waveform in enumerate(audio):
+            student_features = batch["input_features"][i]
+            teacher_features = (
+                student_features
+                if same_feature_extractor
+                else batch["teacher_input_features"][i]
+            )
+            valid_frames = min(
+                math.ceil(len(waveform) / feature_extractor.hop_length),
+                student_features.shape[1],
+                teacher_features.shape[1],
+            )
+            # NumPy is seeded by set_seed in the main process and PyTorch
+            # in each worker; advance it per example, rather than reseeding.
+            # Resume does not restore worker RNG states or prefetched batches:
+            # exact augmentation replay after a streaming resume is not guaranteed.
+            seed = int(np.random.randint(0, 2**32, dtype=np.uint64))
+            student_features, teacher_features = spec_augment_pair(
+                student_features,
+                teacher_features,
+                valid_frames=valid_frames,
+                seed=seed,
+                **SPEC_AUGMENT_PRESETS[spec_augment_policy],
+            )
+            batch["input_features"][i] = student_features
+            if not same_feature_extractor:
+                batch["teacher_input_features"][i] = teacher_features
+
+    # process text targets - for training these are the Whisper-generated pseudo-labels
+    input_str_batched = batch[train_text_column_name]
+    condition_on_prev_batched = batch.get(
+        "condition_on_prev", len(input_str_batched) * [None]
+    )
+    # PATCH: bug fix. The original code reused `prev_ids` as the loop variable
+    # bound to condition_on_prev_batched (so, when a dataset provides its own
+    # `condition_on_prev` column, `prev_ids` started out as a raw bool). It was
+    # only ever reassigned to real token ids in two cases - random draw is
+    # False (-> None), or the dataset has NO precomputed column (-> fall back
+    # to the previous example in this same preprocessing batch). When the
+    # random draw was True AND the dataset DID have its own column, neither
+    # branch fired, so `prev_ids` stayed a bool and crashed a few lines down
+    # trying to iterate over it. Renamed the loop variable to make this
+    # explicit, and added the missing branch: use the dataset's own
+    # precomputed previous-text column when it says this row has one.
+    has_own_condition_on_prev = "condition_on_prev" in batch
+    prev_text_column = (
+        "prev_whisper_transcript" if use_pseudo_labels else "prev_text"
+    )
+    prev_text_batched = batch.get(prev_text_column, len(input_str_batched) * [None])
+
+    all_token_ids = []
+    all_token_ids_unprompted = []
+    for own_condition_on_prev, input_str, own_prev_text in zip(
+        condition_on_prev_batched, input_str_batched, prev_text_batched
+    ):
+        token_ids = tokenizer(
+            input_str, add_special_tokens=not use_pseudo_labels
+        ).input_ids
+
+        # check whether we have timestamps in the PLs and filter if required
+        has_timestamps = len(set(token_ids) & set(timestamp_ids)) > 0
+        if has_timestamps:
+            # sample from binomial distribution to get probability of training on timestamps
+            predict_timestamps = bool(np.random.binomial(1, timestamp_probability))
+            if not predict_timestamps:
+                # filter timestamps and insert the <|notimestamps|> task token
+                token_ids = [
+                    token for token in token_ids if token < timestamp_begin
+                ]
+                token_ids.insert(timestamp_position, timestamp_begin)
+
+        all_token_ids_unprompted.append(token_ids)
+        # check whether to condition on previous text - we do this with probability condition_on_prev_probability
+        condition_on_prev = bool(
+            np.random.binomial(1, condition_on_prev_probability)
+        )
+        prev_ids = None
+        if condition_on_prev:
+            if has_own_condition_on_prev:
+                # PATCH: use the dataset's own precomputed grouping - only if
+                # this row's own flag says it genuinely has valid prior context.
+                if own_condition_on_prev and own_prev_text:
+                    prev_ids = tokenizer(
+                        own_prev_text, add_special_tokens=not use_pseudo_labels
+                    ).input_ids
+            elif len(all_token_ids_unprompted) > 1:
+                # prompt ids are the penultimate token ids in the batch
+                prev_ids = all_token_ids_unprompted[-2]
+
+        if prev_ids is not None:
+            if has_timestamps and not predict_timestamps:
+                # filter timestamp ids from prompt when not predicting timestamps
+                prev_ids = [token for token in prev_ids if token < timestamp_begin]
+
+            # check that the length of the prompt does not exceed more than half the max label length (224)
+            if len(prev_ids) > prompt_cutoff_length:
+                prev_ids = prev_ids[-prompt_cutoff_length + 1 :]
+
+            # and that the total length of the labels does not exceed the max label length (448)
+            if len(prev_ids + token_ids) + 1 > max_label_length:
+                trim_length = len(token_ids) - max_label_length + 1
+                prev_ids = prev_ids[trim_length:]
+
+            prev_ids = [decoder_prev_token_id] + prev_ids
+
+            token_ids = prev_ids + token_ids
+
+        all_token_ids.append(token_ids)
+
+    batch["labels"] = all_token_ids
+    return batch
+
+
+def prepare_eval_dataset(
+    batch,
+    feature_extractor,
+    teacher_feature_extractor,
+    same_feature_extractor,
+    tokenizer,
+):
+    # process audio input
+    sample = batch["audio"]
+    inputs = feature_extractor(
+        sample["array"], sampling_rate=sample["sampling_rate"]
+    )
+    batch["input_features"] = inputs.input_features[0]
+    batch["input_length"] = len(sample["array"])
+    # PATCH: separate feature extraction for the teacher (see prepare_train_dataset).
+    if not same_feature_extractor:
+        teacher_inputs = teacher_feature_extractor(
+            sample["array"], sampling_rate=sample["sampling_rate"]
+        )
+        batch["teacher_input_features"] = teacher_inputs.input_features[0]
+
+    # process targets - for evaluation these are the ground-truth transcriptions
+    input_str = batch["text"]
+    batch["labels"] = tokenizer(input_str).input_ids
+    return batch
+
+
+def kl_divergence(target_distribution, log_predicted_distribution, labels):
+    kl_loss = nn.KLDivLoss(reduction="none")
+    divergence = kl_loss(log_predicted_distribution, target_distribution)
+    # ignore padded tokens from divergence, i.e. where labels are not set to -100
+    padding_mask = labels >= 0
+    padding_mask = padding_mask.unsqueeze(-1)
+    divergence = divergence * padding_mask
+    # take the average over the mini-batch
+    divergence = divergence.sum() / padding_mask.sum()
+    return divergence
+
+
+# Define gradient update step fn
+def train_step(
+    batch,
+    student_model,
+    teacher_model,
+    share_hidden_states,
+    teacher_dtype,
+    kl_weight,
+    temperature=2.0,
+):
+    student_model.train()
+    teacher_model.eval()
+
+    # PATCH: `batch` may carry `teacher_input_features` (a separately-extracted
+    # tensor for the teacher's own mel-bin count) alongside `input_features`
+    # (the student's). Pop it out before calling the student - it wouldn't
+    # recognize that kwarg - and swap it in for the teacher's own call below.
+    teacher_input_features = batch.pop("teacher_input_features", None)
+
+    student_outputs = student_model(**batch)
+    with torch.no_grad():
+        if share_hidden_states:
+            # if the student and teacher share the same frozen encoder then we don't have to recompute the
+            # encoder hidden-states for the teacher model, we can just re-use from the student
+            encoder_outputs = BaseModelOutput(
+                student_outputs.encoder_last_hidden_state.to(dtype=teacher_dtype)
+            )
+            teacher_outputs = teacher_model(
+                encoder_outputs=encoder_outputs, labels=batch["labels"]
+            )
+        else:
+            # do the full forward pass for the teacher model (encoder + decoder)
+            # PATCH: use the teacher's own input_features when we have them.
+            teacher_batch = (
+                batch
+                if teacher_input_features is None
+                else {**batch, "input_features": teacher_input_features}
+            )
+            teacher_outputs = teacher_model(**teacher_batch)
+
+    # CE (data) loss
+    ce_loss = student_outputs.loss
+    # rescale distribution by temperature to ensure gradients scale correctly
+    teacher_distribution = nn.functional.softmax(
+        teacher_outputs.logits / temperature, dim=-1
+    )
+    # log softmax of student predictions for numerical stability
+    student_distribution = nn.functional.log_softmax(
+        student_outputs.logits / temperature, dim=-1
+    )
+    # KL-divergence loss (scaled by temperature)
+    kl_loss = (
+        kl_divergence(teacher_distribution, student_distribution, batch["labels"])
+        * temperature**2
+    )
+
+    # use Distil-Whisper formulation (fix weight of CE loss and tune KL weight)
+    loss = 0.8 * ce_loss + kl_weight * kl_loss
+    metrics = {"loss": loss, "ce_loss": ce_loss, "kl_loss": kl_loss}
+    return loss, metrics
+
+
+# Define eval fn
+def eval_step(
+    batch,
+    student_model,
+    teacher_model,
+    share_hidden_states,
+    teacher_dtype,
+    kl_weight,
+):
+    student_model.eval()
+    teacher_model.eval()
+
+    # PATCH: see the matching comment in train_step.
+    teacher_input_features = batch.pop("teacher_input_features", None)
+
+    with torch.no_grad():
+        student_outputs = student_model(**batch)
+        if share_hidden_states:
+            encoder_outputs = BaseModelOutput(
+                student_outputs.encoder_last_hidden_state.to(dtype=teacher_dtype)
+            )
+            teacher_outputs = teacher_model(
+                encoder_outputs=encoder_outputs, labels=batch["labels"]
+            )
+        else:
+            teacher_batch = (
+                batch
+                if teacher_input_features is None
+                else {**batch, "input_features": teacher_input_features}
+            )
+            teacher_outputs = teacher_model(**teacher_batch)
+
+    # CE (data) loss
+    ce_loss = student_outputs.loss
+
+    # log softmax / softmax for numerical stability
+    student_distribution = nn.functional.log_softmax(student_outputs.logits, dim=-1)
+    teacher_distribution = nn.functional.softmax(teacher_outputs.logits, dim=-1)
+    # temperature is always 1 for eval
+    kl_loss = kl_divergence(
+        teacher_distribution, student_distribution, batch["labels"]
+    )
+
+    # use Distil-Whisper formulation (fix weight of CE loss and tune KL weight)
+    loss = 0.8 * ce_loss + kl_weight * kl_loss
+    metrics = {"loss": loss, "ce_loss": ce_loss, "kl_loss": kl_loss}
+    return metrics
+
+
 def main():
+    session_started_at = datetime.now(timezone.utc).isoformat()
+    session_start = time.perf_counter()
+    session_evaluation_seconds = 0.0
     # 1. Parse input arguments
     # We keep distinct sets of args, for cleaner separation of model/data/training related args
-    parser = HfArgumentParser((ModelArguments, DataTrainingArguments, DistillationTrainingArguments))
+    parser = HfArgumentParser(
+        (ModelArguments, DataTrainingArguments, DistillationTrainingArguments)
+    )
 
     if len(sys.argv) == 2 and sys.argv[1].endswith(".json"):
         # If we pass only one argument to the script and it's the path to a json file,
         # let's parse it to get our arguments.
-        model_args, data_args, training_args = parser.parse_json_file(json_file=os.path.abspath(sys.argv[1]))
+        model_args, data_args, training_args = parser.parse_json_file(
+            json_file=os.path.abspath(sys.argv[1])
+        )
     else:
         model_args, data_args, training_args = parser.parse_args_into_dataclasses()
+
+    if data_args.spec_augment_policy != "none":
+        if data_args.spec_augment_policy not in SPEC_AUGMENT_PRESETS:
+            raise ValueError("Unknown spec_augment_policy")
+        if not data_args.streaming:
+            raise ValueError(
+                "SpecAugment requires streaming=True for fresh augmentation each pass"
+            )
+        if (
+            SPEC_AUGMENT_PRESETS[data_args.spec_augment_policy]["time_warp_param"]
+            and data_args.timestamp_probability > 0
+        ):
+            raise ValueError(
+                "Warped policies require timestamp_probability=0 until timestamp remapping is supported"
+            )
+
+    loss_history_dir = (
+        training_args.output_dir
+        if not training_args.report_to or training_args.report_to in ("none", ["none"])
+        else None
+    )
 
     # 2. Initialize the accelerator
     # We will let the accelerator handle device placement for us in this example
@@ -815,10 +1312,8 @@ def main():
     accelerator.init_trackers(
         project_name=data_args.wandb_project,
         init_kwargs={
-            "wandb": {"name": data_args.wandb_name,
-                      "dir": data_args.wandb_dir}
-        }
-
+            "wandb": {"name": data_args.wandb_name, "dir": data_args.wandb_dir}
+        },
     )
 
     # 3. Set-up basic logging
@@ -845,14 +1340,31 @@ def main():
 
     # 4. Detecting last checkpoint and eventually continue from last checkpoint
     last_checkpoint = None
-    if os.path.isdir(training_args.output_dir) and training_args.do_train and not training_args.overwrite_output_dir:
+    # PATCH: `overwrite_output_dir` was removed from TrainingArguments in newer
+    # transformers versions (we're on 5.12.1, this script predates that), so
+    # there's no longer any way to pass True for it via the CLI. That combined
+    # with `Accelerator(project_dir=output_dir, ...)`/`init_trackers(...)` a few
+    # lines above (which writes a tensorboard event file into output_dir
+    # immediately on startup, whenever a tracker is active) means this check
+    # would ALWAYS raise from this point on, regardless of what the caller does
+    # beforehand (even an `rm -rf` right before launching can't win - the
+    # script repopulates the directory itself before this check runs). So:
+    # default permissive instead of blocking, since the "protect against
+    # accidental overwrite" behavior this guarded can no longer be expressed.
+    if (
+        os.path.isdir(training_args.output_dir)
+        and training_args.do_train
+        and not getattr(training_args, "overwrite_output_dir", True)
+    ):
         last_checkpoint = get_last_checkpoint(training_args.output_dir)
         if last_checkpoint is None and len(os.listdir(training_args.output_dir)) > 0:
             raise ValueError(
                 f"Output directory ({training_args.output_dir}) already exists and is not empty. "
                 "Use --overwrite_output_dir to overcome."
             )
-        elif last_checkpoint is not None and training_args.resume_from_checkpoint is None:
+        elif (
+            last_checkpoint is not None and training_args.resume_from_checkpoint is None
+        ):
             logger.info(
                 f"Checkpoint detected, resuming training at {last_checkpoint}. To avoid this behavior, change "
                 "the `--output_dir` or add `--overwrite_output_dir` to train from scratch."
@@ -860,6 +1372,32 @@ def main():
 
     # 5. Handle the repository creation
     if accelerator.is_main_process:
+        os.makedirs(training_args.output_dir, exist_ok=True)
+        # Flat arguments can be read back by this script's JSON CLI parser.
+        run_config = {
+            **asdict(model_args),
+            **asdict(data_args),
+            **training_args.to_dict(),
+        }
+        argument_names = {
+            item.name
+            for args in (model_args, data_args, training_args)
+            for item in fields(args)
+            if item.init
+        }
+        run_config = {
+            key: value
+            for key, value in run_config.items()
+            if key in argument_names and key != "token" and not key.endswith("_token")
+        }
+        config_path = Path(training_args.output_dir) / "run_config.json"
+        if config_path.exists():
+            shutil.copy2(
+                config_path,
+                config_path.with_name(f"run_config.previous-{time.time_ns()}.json"),
+            )
+        config_path.write_text(json.dumps(run_config, indent=2) + "\n")
+        logger.info("Run arguments saved to %s", config_path)
         if training_args.push_to_hub:
             if training_args.hub_model_id is None:
                 repo_name = get_full_repo_name(
@@ -870,7 +1408,9 @@ def main():
                 repo_name = training_args.hub_model_id
             create_repo(repo_name, exist_ok=True, token=training_args.hub_token)
 
-            with open(os.path.join(training_args.output_dir, ".gitignore"), "w+") as gitignore:
+            with open(
+                os.path.join(training_args.output_dir, ".gitignore"), "w+"
+            ) as gitignore:
                 if "wandb" not in gitignore:
                     gitignore.write("wandb\n")
         elif training_args.output_dir is not None:
@@ -901,7 +1441,9 @@ def main():
 
     if training_args.do_eval:
         dataset_names_dict = convert_dataset_str_to_list(
-            data_args.eval_dataset_name if data_args.eval_dataset_name else data_args.train_dataset_name,
+            data_args.eval_dataset_name
+            if data_args.eval_dataset_name
+            else data_args.train_dataset_name,
             (
                 data_args.eval_dataset_config_name
                 if data_args.eval_dataset_config_name
@@ -924,13 +1466,17 @@ def main():
                 streaming=data_args.streaming,
             )
             if data_args.eval_text_column_name != "text":
-                raw_datasets["eval"] = raw_datasets["eval"].rename_column(data_args.eval_text_column_name, "text")
+                raw_datasets["eval"] = raw_datasets["eval"].rename_column(
+                    data_args.eval_text_column_name, "text"
+                )
         else:
             # load multiple eval sets
             for dataset_dict in dataset_names_dict:
                 if dataset_dict["name"] == "esb/diagnostic-dataset":
                     # for the ESB diagnostic dataset, the dataset name is effectively the config
-                    pretty_name = f"{dataset_dict['config']}-diagnostic/{dataset_dict['split']}"
+                    pretty_name = (
+                        f"{dataset_dict['config']}-diagnostic/{dataset_dict['split']}"
+                    )
                 else:
                     pretty_name = f"{dataset_dict['name'].split('/')[-1]}/{dataset_dict['split'].replace('.', '-')}"
                 all_eval_splits.append(pretty_name)
@@ -958,19 +1504,46 @@ def main():
 
     # 7. Load pretrained model, tokenizer, and feature extractor
     config = WhisperConfig.from_pretrained(
-        (model_args.config_name if model_args.config_name else model_args.model_name_or_path),
+        (
+            model_args.config_name
+            if model_args.config_name
+            else model_args.model_name_or_path
+        ),
         cache_dir=model_args.cache_dir,
         revision=model_args.model_revision,
         token=model_args.token,
     )
     feature_extractor = WhisperFeatureExtractor.from_pretrained(
-        (model_args.feature_extractor_name if model_args.feature_extractor_name else model_args.model_name_or_path),
+        (
+            model_args.feature_extractor_name
+            if model_args.feature_extractor_name
+            else model_args.model_name_or_path
+        ),
         cache_dir=model_args.cache_dir,
         revision=model_args.model_revision,
         token=model_args.token,
     )
+    # PATCH: separate feature extraction for the teacher. Whisper-large-v3 uses
+    # 128 mel bins where every other Whisper size uses 80 - the original script
+    # computed ONE `input_features` tensor (from the student's feature
+    # extractor) and fed it to both models, which crashes if student and
+    # teacher disagree on mel-bin count. Load the teacher's own feature
+    # extractor here; `prepare_train_dataset`/`prepare_eval_dataset` compute a
+    # second `teacher_input_features` from it, and train_step/eval_step use
+    # that one for the teacher's forward pass instead of reusing the
+    # student's. When student and teacher DO share an extractor (the
+    # `share_hidden_states` case), this is a harmless duplicate load/compute.
+    teacher_feature_extractor = WhisperFeatureExtractor.from_pretrained(
+        model_args.teacher_model_name_or_path,
+        cache_dir=model_args.cache_dir,
+        token=model_args.token,
+    )
     tokenizer = WhisperTokenizerFast.from_pretrained(
-        (model_args.tokenizer_name if model_args.tokenizer_name else model_args.model_name_or_path),
+        (
+            model_args.tokenizer_name
+            if model_args.tokenizer_name
+            else model_args.model_name_or_path
+        ),
         cache_dir=model_args.cache_dir,
         use_fast=model_args.use_fast_tokenizer,
         revision=model_args.model_revision,
@@ -978,7 +1551,10 @@ def main():
     )
 
     # override timestamp tokens until tokenizer issues are fixed in transformers
-    timestamps = [AddedToken("<|%.2f|>" % (i * 0.02), lstrip=False, rstrip=False) for i in range(1500 + 1)]
+    timestamps = [
+        AddedToken("<|%.2f|>" % (i * 0.02), lstrip=False, rstrip=False)
+        for i in range(1500 + 1)
+    ]
     tokenizer.add_tokens(timestamps)
 
     # The teacher model can safely be cast to the dtype of training since we don't
@@ -991,6 +1567,36 @@ def main():
         torch_dtype=teacher_dtype,
         attn_implementation=model_args.attn_implementation,
     )
+    # PATCH: vocab-size mismatch fix.
+    #
+    # The tokenizer used everywhere in this script (`tokenizer`, loaded above
+    # from the STUDENT's checkpoint) may not have the same vocab size as the
+    # teacher's own native output layer. (`tokenizer.add_tokens(timestamps)`
+    # a few lines up does NOT affect this - verified separately: those tokens
+    # already exist as special tokens in Whisper's tokenizer, so add_tokens()
+    # on them is a no-op for `len(tokenizer)`, both before and after.)
+    #
+    # The real, purely-native mismatch: `openai/whisper-large-v3`'s tokenizer
+    # is vocab size 51866 - one MORE than every other Whisper checkpoint
+    # (51865, e.g. whisper-small's), because large-v3 added an extra special
+    # token. If the student is derived from e.g. whisper-small, the teacher's
+    # logits come out one column wider than the student's, and `KLDivLoss` in
+    # `kl_divergence()` crashes with a shape mismatch ("size of tensor a
+    # (51866) must match the size of tensor b (51865)") the first time it
+    # actually runs.
+    #
+    # Resizing the teacher's embeddings/lm_head to `len(tokenizer)` fixes
+    # this by matching its output dimension to whatever every other tensor in
+    # training actually uses. This is a real (if small) change to the
+    # teacher's pretrained output layer - when growing the vocab, the new
+    # row(s) are freshly/randomly initialised, not pretrained - but the
+    # teacher is frozen throughout distillation (see `teacher_model.eval()`
+    # in train_step/eval_step) and never receives gradient updates, so that
+    # row simply sits at whatever (near-arbitrary, near-irrelevant) initial
+    # value it got and never influences training beyond contributing one
+    # extra, functionally-unused entry to the softmax normalisation.
+    if teacher_model.config.vocab_size != len(tokenizer):
+        teacher_model.resize_token_embeddings(len(tokenizer))
 
     student_model = WhisperForConditionalGeneration.from_pretrained(
         model_args.model_name_or_path,
@@ -1003,7 +1609,10 @@ def main():
         attn_implementation=model_args.attn_implementation,
     )
 
-    if student_model.config.decoder_start_token_id is None or teacher_model.config.decoder_start_token_id is None:
+    if (
+        student_model.config.decoder_start_token_id is None
+        or teacher_model.config.decoder_start_token_id is None
+    ):
         raise ValueError(
             f"Make sure that `config.decoder_start_token_id` is correctly defined for both the "
             f"student and teacher model. Got {student_model.config.decoder_start_token_id} for the "
@@ -1023,35 +1632,59 @@ def main():
     if training_args.freeze_encoder:
         set_trainable_parameters(student_model.model.encoder, requires_grad=False)
         student_model.model.encoder.gradient_checkpointing = False
-    
+
     if training_args.freeze_decoder:
         set_trainable_parameters(student_model.model.decoder, requires_grad=False)
         student_model.model.decoder.gradient_checkpointing = False
         # un-freeze LM head parameters (and consequently word embeddings), frozen when frozing decoder since tied word embedding and LM head
-        set_trainable_parameters(student_model.proj_out, requires_grad=True) 
-        
+        set_trainable_parameters(student_model.proj_out, requires_grad=True)
 
     if training_args.freeze_embed_positions:
         # set_trainable_parameters(student_model.model.decoder.embed_tokens, requires_grad=False)
-        set_trainable_parameters(student_model.model.decoder.embed_positions, requires_grad=False)
+        set_trainable_parameters(
+            student_model.model.decoder.embed_positions, requires_grad=False
+        )
         if student_model.model.decoder.gradient_checkpointing:
             logger.info(
                 "Disabling gradient checkpointing in the decoder since it's incompatible with `freeze_embed_positions`."
             )
-    
+
     logger.info(
         f"Number of trainable parameters: {sum(p.numel() for p in student_model.parameters() if p.requires_grad):.3e}"
     )
 
-    share_hidden_states = training_args.freeze_encoder and student_model.config.d_model == teacher_model.config.d_model
+    # PATCH: optimization - skip the teacher's (redundant) feature extraction
+    # entirely when it would produce the exact same array as the student's
+    # (e.g. small+small pairings, or any case where the two checkpoints share
+    # a feature extractor config). Only pairings that actually disagree (e.g.
+    # a whisper-large-v3 teacher, 128 mel bins, over a non-v3 student, 80 mel
+    # bins) need the second extraction at all - see prepare_train_dataset/
+    # prepare_eval_dataset and the collator, which check this flag.
+    same_feature_extractor = (
+        feature_extractor.to_dict() == teacher_feature_extractor.to_dict()
+    )
+
+    if data_args.spec_augment_policy != "none":
+        student_model.config.apply_spec_augment = False
+        teacher_model.config.apply_spec_augment = False
+
+    share_hidden_states = (
+        training_args.freeze_encoder
+        and student_model.config.d_model == teacher_model.config.d_model
+    )
     if share_hidden_states:
         # tie the weights for the teacher encoder if we're freezing the student and it's the same as the teacher
         teacher_model.model.encoder = student_model.model.encoder
 
-    if hasattr(teacher_model.generation_config, "is_multilingual") and teacher_model.generation_config.is_multilingual:
+    if (
+        hasattr(teacher_model.generation_config, "is_multilingual")
+        and teacher_model.generation_config.is_multilingual
+    ):
         # We need to set the language and task ids for previously multilingual checkpoints
         is_multilingual = True
-        tokenizer.set_prefix_tokens(language=data_args.language, task=data_args.task, predict_timestamps=False)
+        tokenizer.set_prefix_tokens(
+            language=data_args.language, task=data_args.task, predict_timestamps=False
+        )
         student_model.generation_config.update(
             **{
                 "language": data_args.language,
@@ -1090,18 +1723,24 @@ def main():
     max_input_length = int(data_args.max_duration_in_seconds * sampling_rate)
     min_input_length = int(data_args.min_duration_in_seconds * sampling_rate)
     max_label_length = (
-        data_args.max_label_length if data_args.max_label_length is not None else student_model.config.max_length
+        data_args.max_label_length
+        if data_args.max_label_length is not None
+        else student_model.config.max_length
     )
 
     timestamp_probability = data_args.timestamp_probability
     condition_on_prev_probability = data_args.condition_on_prev_probability
-    return_timestamps = data_args.return_timestamps if timestamp_probability > 0 else False
+    return_timestamps = (
+        data_args.return_timestamps if timestamp_probability > 0 else False
+    )
 
     timestamp_ids = tokenizer.timestamp_ids()
     timestamp_begin = tokenizer.all_special_ids[-1]
     timestamp_position = 3 if is_multilingual else 1
 
-    decoder_start_token_id = student_model.config.decoder_start_token_id  # <|startoftranscript|>
+    decoder_start_token_id = (
+        student_model.config.decoder_start_token_id
+    )  # <|startoftranscript|>
     decoder_prev_token_id = tokenizer.all_special_ids[-3]  # <|startofprev|>
     prompt_cutoff_length = max_label_length // 2
 
@@ -1118,6 +1757,32 @@ def main():
     wer_threshold = data_args.wer_threshold
     use_pseudo_labels = data_args.use_pseudo_labels
     train_text_column_name = "whisper_transcript" if use_pseudo_labels else "text"
+
+    # Estimate streaming evaluation size without iterating over or decoding audio.
+    eval_sample_counts = {}
+    if training_args.do_eval and data_args.streaming:
+        for eval_split, dataset_dict in zip(all_eval_splits, dataset_names_dict):
+            split_name = dataset_dict["split"]
+            split_info = (raw_datasets[eval_split].info.splits or {}).get(split_name)
+            count = split_info.num_examples if split_info is not None else None
+            if count is None and Path(dataset_dict["name"]).is_dir():
+                # Local Parquet directories may have no DatasetInfo row counts.
+                import pyarrow.parquet as pq
+
+                files = list(
+                    Path(dataset_dict["name"]).rglob(f"{split_name}-*.parquet")
+                )
+                if files:
+                    count = sum(
+                        pq.ParquetFile(path).metadata.num_rows for path in files
+                    )
+            if data_args.max_eval_samples is not None:
+                count = (
+                    min(count, data_args.max_eval_samples)
+                    if count is not None
+                    else data_args.max_eval_samples
+                )
+            eval_sample_counts[eval_split] = count
 
     # 10.2: filter based on maximum number of training/evaluation samples
     if training_args.do_train and data_args.max_train_samples is not None:
@@ -1138,12 +1803,17 @@ def main():
     # 10.3: filter training data based on WER threshold -> this is KEY to good distillation performance
     def is_wer_in_range(ground_truth, whisper_transcript):
         norm_ground_truth = normalizer(ground_truth)
-        if whisper_transcript is not None and whisper_transcript.upper() == whisper_transcript:
+        if (
+            whisper_transcript is not None
+            and whisper_transcript.upper() == whisper_transcript
+        ):
             # filter entirely upper-case transcriptions: these are erroneous generations from large-v3
             return False
         elif len(norm_ground_truth) > 0 and whisper_transcript is not None:
             norm_whisper_transcript = normalizer(whisper_transcript)
-            wer = 100 * metric.compute(predictions=[norm_whisper_transcript], references=[norm_ground_truth])
+            wer = 100 * metric.compute(
+                predictions=[norm_whisper_transcript], references=[norm_ground_truth]
+            )
             return wer < wer_threshold
         else:
             # filter automatically since we can't know the WER
@@ -1158,96 +1828,52 @@ def main():
     if wer_threshold is not None and use_pseudo_labels:
         with accelerator.main_process_first():
             raw_datasets["train"] = (
-                filter_by_wer_threshold(num_proc=num_workers, desc="filtering train dataset by wer")
+                filter_by_wer_threshold(
+                    num_proc=num_workers, desc="filtering train dataset by wer"
+                )
                 if not data_args.streaming
                 else filter_by_wer_threshold()
             )
 
     # 10.4: pre-process training/evaluation datasets
-    def prepare_train_dataset(batch):
-        """
-        Pre-process the raw dataset in a three stage process:
-            1. Convert the audio arrays to log-mel spectrogram inputs
-            2. Possibly filter the timestamp tokens from the token ids (depending on the timestamp probability)
-            3. Possibly add prompt tokens if conditioning on previous text (depending on the conditioning probability)
-        """
-        # process audio input
-        audio = [sample["array"] for sample in batch["audio"]]
-        inputs = feature_extractor(audio, sampling_rate=sampling_rate)
-        batch["input_features"] = inputs.input_features
-        batch["input_length"] = [len(sample) for sample in audio]
+    prepare_train_dataset_fn = partial(
+        prepare_train_dataset,
+        feature_extractor=feature_extractor,
+        teacher_feature_extractor=teacher_feature_extractor,
+        same_feature_extractor=same_feature_extractor,
+        sampling_rate=sampling_rate,
+        spec_augment_policy=data_args.spec_augment_policy,
+        train_text_column_name=train_text_column_name,
+        use_pseudo_labels=use_pseudo_labels,
+        timestamp_ids=timestamp_ids,
+        timestamp_probability=timestamp_probability,
+        timestamp_begin=timestamp_begin,
+        timestamp_position=timestamp_position,
+        condition_on_prev_probability=condition_on_prev_probability,
+        prompt_cutoff_length=prompt_cutoff_length,
+        max_label_length=max_label_length,
+        decoder_prev_token_id=decoder_prev_token_id,
+        tokenizer=tokenizer,
+    )
 
-        # process text targets - for training these are the Whisper-generated pseudo-labels
-        input_str_batched = batch[train_text_column_name]
-        condition_on_prev_batched = batch.get("condition_on_prev", len(input_str_batched) * [None])
+    prepare_eval_dataset_fn = partial(
+        prepare_eval_dataset,
+        feature_extractor=feature_extractor,
+        teacher_feature_extractor=teacher_feature_extractor,
+        same_feature_extractor=same_feature_extractor,
+        tokenizer=tokenizer,
+    )
 
-        all_token_ids = []
-        all_token_ids_unprompted = []
-        for prev_ids, input_str in zip(condition_on_prev_batched, input_str_batched):
-            token_ids = tokenizer(input_str, add_special_tokens=not use_pseudo_labels).input_ids
-
-            # check whether we have timestamps in the PLs and filter if required
-            has_timestamps = len(set(token_ids) & set(timestamp_ids)) > 0
-            if has_timestamps:
-                # sample from binomial distribution to get probability of training on timestamps
-                predict_timestamps = bool(np.random.binomial(1, timestamp_probability))
-                if not predict_timestamps:
-                    # filter timestamps and insert the <|notimestamps|> task token
-                    token_ids = [token for token in token_ids if token < timestamp_begin]
-                    token_ids.insert(timestamp_position, timestamp_begin)
-
-            all_token_ids_unprompted.append(token_ids)
-            # check whether to condition on previous text - we do this with probability condition_on_prev_probability
-            condition_on_prev = bool(np.random.binomial(1, condition_on_prev_probability))
-            if not condition_on_prev:
-                prev_ids = None
-            elif "condition_on_prev" not in batch and len(all_token_ids_unprompted) > 1:
-                # prompt ids are the penultimate token ids in the batch
-                prev_ids = all_token_ids_unprompted[-2]
-
-            if prev_ids is not None:
-                if has_timestamps and not predict_timestamps:
-                    # filter timestamp ids from prompt when not predicting timestamps
-                    prev_ids = [token for token in prev_ids if token < timestamp_begin]
-
-                # check that the length of the prompt does not exceed more than half the max label length (224)
-                if len(prev_ids) > prompt_cutoff_length:
-                    prev_ids = prev_ids[-prompt_cutoff_length + 1 :]
-
-                # and that the total length of the labels does not exceed the max label length (448)
-                if len(prev_ids + token_ids) + 1 > max_label_length:
-                    trim_length = len(token_ids) - max_label_length + 1
-                    prev_ids = prev_ids[trim_length:]
-
-                prev_ids = [decoder_prev_token_id] + prev_ids
-
-                token_ids = prev_ids + token_ids
-
-            all_token_ids.append(token_ids)
-
-        batch["labels"] = all_token_ids
-        return batch
-
-    def prepare_eval_dataset(batch):
-        # process audio input
-        sample = batch["audio"]
-        inputs = feature_extractor(sample["array"], sampling_rate=sample["sampling_rate"])
-        batch["input_features"] = inputs.input_features[0]
-        batch["input_length"] = len(sample["array"])
-
-        # process targets - for evaluation these are the ground-truth transcriptions
-        input_str = batch["text"]
-        batch["labels"] = tokenizer(input_str).input_ids
-        return batch
-
-    vectorized_datasets = IterableDatasetDict() if data_args.streaming else DatasetDict()
+    vectorized_datasets = (
+        IterableDatasetDict() if data_args.streaming else DatasetDict()
+    )
     if training_args.do_train:
         # with streaming mode we can only have 1 worker, whereas with non-streaming
         # we can use `num_workers` (which is much faster)
         # We gate the pre-processing function accordingly
         map_fn_train = partial(
             raw_datasets["train"].map,
-            function=prepare_train_dataset,
+            function=prepare_train_dataset_fn,
             remove_columns=raw_datasets_train_features,
             batched=True,
             batch_size=data_args.preprocessing_batch_size,
@@ -1262,7 +1888,9 @@ def main():
         for eval_split in all_eval_splits:
             raw_datasets_eval_features = list(raw_datasets[eval_split].features.keys())
             map_fn_eval = partial(
-                raw_datasets[eval_split].map, function=prepare_eval_dataset, remove_columns=raw_datasets_eval_features
+                raw_datasets[eval_split].map,
+                function=prepare_eval_dataset_fn,
+                remove_columns=raw_datasets_eval_features,
             )
             with accelerator.main_process_first():
                 vectorized_datasets[eval_split] = (
@@ -1276,11 +1904,15 @@ def main():
         return min_input_length < length < max_input_length
 
     filter_by_audio_fn = partial(
-        vectorized_datasets.filter, function=is_audio_in_length_range, input_columns=["input_length"]
+        vectorized_datasets.filter,
+        function=is_audio_in_length_range,
+        input_columns=["input_length"],
     )
     with accelerator.main_process_first():
         vectorized_datasets = (
-            filter_by_audio_fn(num_proc=num_workers, desc="filtering train dataset by audio length")
+            filter_by_audio_fn(
+                num_proc=num_workers, desc="filtering train dataset by audio length"
+            )
             if not data_args.streaming
             else filter_by_audio_fn()
         )
@@ -1290,7 +1922,9 @@ def main():
         return 0 < len(labels) <= max_label_length
 
     filter_by_labels_fn = partial(
-        vectorized_datasets.filter, function=is_labels_in_length_range, input_columns=["labels"]
+        vectorized_datasets.filter,
+        function=is_labels_in_length_range,
+        input_columns=["labels"],
     )
     with accelerator.main_process_first():
         vectorized_datasets = (
@@ -1322,23 +1956,59 @@ def main():
         for idx in range(len(labels)):
             labels[idx][labels[idx] == -100] = tokenizer.pad_token_id
 
-        pred_str = tokenizer.batch_decode(preds, skip_special_tokens=True, decode_with_timestamps=return_timestamps)
-        # we do not want to group tokens when computing the metrics
-        label_str = tokenizer.batch_decode(labels, skip_special_tokens=True)
+        # Decode one sequence at a time: newer Transformers batch_decode
+        # forwards the entire list of tensors to Whisper's prompt stripping.
+        pred_str = [
+            tokenizer.decode(
+                pred.cpu().tolist(),
+                skip_special_tokens=True,
+                decode_with_timestamps=return_timestamps,
+                clean_up_tokenization_spaces=False,
+            )
+            for pred in preds
+        ]
+        label_str = [
+            tokenizer.decode(
+                label.cpu().tolist(),
+                skip_special_tokens=True,
+                clean_up_tokenization_spaces=False,
+            )
+            for label in labels
+        ]
         wer_ortho = 100 * metric.compute(predictions=pred_str, references=label_str)
 
         # normalize everything and re-compute the WER
         norm_pred_str = [normalizer(pred) for pred in pred_str]
         norm_label_str = [normalizer(label) for label in label_str]
         # for logging, we need the pred/labels to match the norm_pred/norm_labels, so discard any filtered samples here
-        pred_str = [pred_str[i] for i in range(len(norm_pred_str)) if len(norm_label_str[i]) > 0]
-        label_str = [label_str[i] for i in range(len(norm_label_str)) if len(norm_label_str[i]) > 0]
+        pred_str = [
+            pred_str[i] for i in range(len(norm_pred_str)) if len(norm_label_str[i]) > 0
+        ]
+        label_str = [
+            label_str[i]
+            for i in range(len(norm_label_str))
+            if len(norm_label_str[i]) > 0
+        ]
         # filtering step to only evaluate the samples that correspond to non-zero normalized references:
-        norm_pred_str = [norm_pred_str[i] for i in range(len(norm_pred_str)) if len(norm_label_str[i]) > 0]
-        norm_label_str = [norm_label_str[i] for i in range(len(norm_label_str)) if len(norm_label_str[i]) > 0]
+        norm_pred_str = [
+            norm_pred_str[i]
+            for i in range(len(norm_pred_str))
+            if len(norm_label_str[i]) > 0
+        ]
+        norm_label_str = [
+            norm_label_str[i]
+            for i in range(len(norm_label_str))
+            if len(norm_label_str[i]) > 0
+        ]
 
         wer = 100 * metric.compute(predictions=norm_pred_str, references=norm_label_str)
-        return {"wer": wer, "wer_ortho": wer_ortho}, pred_str, label_str, norm_pred_str, norm_label_str
+        return (
+            {"wer": wer, "wer_ortho": wer_ortho},
+            pred_str,
+            label_str,
+            norm_pred_str,
+            norm_label_str,
+        )
 
     # 12. Define Training Schedule
     # Store some constants
@@ -1349,20 +2019,28 @@ def main():
 
     if not data_args.streaming and training_args.max_steps < 0:
         num_epochs = int(training_args.num_train_epochs)
-        steps_per_epoch = len(vectorized_datasets["train"]) // (train_batch_size * gradient_accumulation_steps)
+        steps_per_epoch = len(vectorized_datasets["train"]) // (
+            train_batch_size * gradient_accumulation_steps
+        )
         total_train_steps = steps_per_epoch * num_epochs
     elif training_args.max_steps > 0:
-        logger.info("max_steps is given, it will override any value given in num_train_epochs")
+        logger.info(
+            "max_steps is given, it will override any value given in num_train_epochs"
+        )
         total_train_steps = int(training_args.max_steps)
         if not data_args.streaming:
-            steps_per_epoch = len(vectorized_datasets["train"]) // (train_batch_size * gradient_accumulation_steps)
+            steps_per_epoch = len(vectorized_datasets["train"]) // (
+                train_batch_size * gradient_accumulation_steps
+            )
             num_epochs = int(np.ceil(total_train_steps / steps_per_epoch))
         else:
             # Setting a very large number of epochs so we go as many times as necessary over the iterator.
             num_epochs = sys.maxsize
             steps_per_epoch = total_train_steps
     else:
-        raise ValueError("max_steps must be specified when training with a streaming (iterable) dataset")
+        raise ValueError(
+            "max_steps must be specified when training with a streaming (iterable) dataset"
+        )
 
     if training_args.eval_steps is None:
         logger.info(
@@ -1373,12 +2051,12 @@ def main():
         eval_steps = training_args.eval_steps
 
     # 13. Define optimizer, LR scheduler, collator
-    
+
     forbidden_module = [
         module
         for module, flag in [
             (student_model.model.encoder, training_args.freeze_encoder),
-            (student_model.model.decoder, training_args.freeze_decoder)
+            (student_model.model.decoder, training_args.freeze_decoder),
         ]
         if flag
     ] or None
@@ -1391,11 +2069,19 @@ def main():
     decay_parameters = [name for name in decay_parameters if "bias" not in name]
     optimizer_grouped_parameters = [
         {
-            "params": [param for name, param in student_model.named_parameters() if name in decay_parameters],
+            "params": [
+                param
+                for name, param in student_model.named_parameters()
+                if name in decay_parameters
+            ],
             "weight_decay": training_args.weight_decay,
         },
         {
-            "params": [param for name, param in student_model.named_parameters() if name not in decay_parameters],
+            "params": [
+                param
+                for name, param in student_model.named_parameters()
+                if name not in decay_parameters
+            ],
             "weight_decay": 0.0,
         },
     ]
@@ -1421,6 +2107,7 @@ def main():
         input_padding="longest",
         target_padding="max_length",
         max_target_length=max_label_length,
+        teacher_feature_extractor=teacher_feature_extractor,  # PATCH
     )
 
     # 14. Define generation arguments - we need to do this before we wrap the models in DDP
@@ -1450,89 +2137,45 @@ def main():
         student_model, teacher_model, optimizer, lr_scheduler
     )
 
-    def kl_divergence(target_distribution, log_predicted_distribution, labels):
-        kl_loss = nn.KLDivLoss(reduction="none")
-        divergence = kl_loss(log_predicted_distribution, target_distribution)
-        # ignore padded tokens from divergence, i.e. where labels are not set to -100
-        padding_mask = labels >= 0
-        padding_mask = padding_mask.unsqueeze(-1)
-        divergence = divergence * padding_mask
-        # take the average over the mini-batch
-        divergence = divergence.sum() / padding_mask.sum()
-        return divergence
+    train_step_fn = partial(
+        train_step,
+        student_model=student_model,
+        teacher_model=teacher_model,
+        share_hidden_states=share_hidden_states,
+        teacher_dtype=teacher_dtype,
+        kl_weight=training_args.kl_weight,
+    )
 
-    # Define gradient update step fn
-    def train_step(
-        batch,
-        temperature=2.0,
-    ):
-        student_model.train()
-        teacher_model.eval()
-
-        student_outputs = student_model(**batch)
-        with torch.no_grad():
-            if share_hidden_states:
-                # if the student and teacher share the same frozen encoder then we don't have to recompute the
-                # encoder hidden-states for the teacher model, we can just re-use from the student
-                encoder_outputs = BaseModelOutput(student_outputs.encoder_last_hidden_state.to(dtype=teacher_dtype))
-                teacher_outputs = teacher_model(encoder_outputs=encoder_outputs, labels=batch["labels"])
-            else:
-                # do the full forward pass for the teacher model (encoder + decoder)
-                teacher_outputs = teacher_model(**batch)
-
-        # CE (data) loss
-        ce_loss = student_outputs.loss
-        # rescale distribution by temperature to ensure gradients scale correctly
-        teacher_distribution = nn.functional.softmax(teacher_outputs.logits / temperature, dim=-1)
-        # log softmax of student predictions for numerical stability
-        student_distribution = nn.functional.log_softmax(student_outputs.logits / temperature, dim=-1)
-        # KL-divergence loss (scaled by temperature)
-        kl_loss = kl_divergence(teacher_distribution, student_distribution, batch["labels"]) * temperature**2
-
-        # use Distil-Whisper formulation (fix weight of CE loss and tune KL weight)
-        loss = 0.8 * ce_loss + training_args.kl_weight * kl_loss
-        metrics = {"loss": loss, "ce_loss": ce_loss, "kl_loss": kl_loss}
-        return loss, metrics
-
-    # Define eval fn
-    def eval_step(batch):
-        student_model.eval()
-        teacher_model.eval()
-
-        with torch.no_grad():
-            student_outputs = student_model(**batch)
-            if share_hidden_states:
-                encoder_outputs = BaseModelOutput(student_outputs.encoder_last_hidden_state.to(dtype=teacher_dtype))
-                teacher_outputs = teacher_model(encoder_outputs=encoder_outputs, labels=batch["labels"])
-            else:
-                teacher_outputs = teacher_model(**batch)
-
-        # CE (data) loss
-        ce_loss = student_outputs.loss
-
-        # log softmax / softmax for numerical stability
-        student_distribution = nn.functional.log_softmax(student_outputs.logits, dim=-1)
-        teacher_distribution = nn.functional.softmax(teacher_outputs.logits, dim=-1)
-        # temperature is always 1 for eval
-        kl_loss = kl_divergence(teacher_distribution, student_distribution, batch["labels"])
-
-        # use Distil-Whisper formulation (fix weight of CE loss and tune KL weight)
-        loss = 0.8 * ce_loss + training_args.kl_weight * kl_loss
-        metrics = {"loss": loss, "ce_loss": ce_loss, "kl_loss": kl_loss}
-        return metrics
+    eval_step_fn = partial(
+        eval_step,
+        student_model=student_model,
+        teacher_model=teacher_model,
+        share_hidden_states=share_hidden_states,
+        teacher_dtype=teacher_dtype,
+        kl_weight=training_args.kl_weight,
+    )
 
     def generate_step(batch):
         student_model.eval()
-        output_ids = accelerator.unwrap_model(student_model).generate(batch["input_features"], **gen_kwargs)
-        output_ids = accelerator.pad_across_processes(output_ids, dim=1, pad_index=tokenizer.pad_token_id)
+        output_ids = accelerator.unwrap_model(student_model).generate(
+            batch["input_features"], **gen_kwargs
+        )
+        output_ids = accelerator.pad_across_processes(
+            output_ids, dim=1, pad_index=tokenizer.pad_token_id
+        )
         return output_ids
 
     logger.info("***** Running training *****")
-    logger.info(f"  Num examples = {total_train_steps * train_batch_size * gradient_accumulation_steps}")
+    logger.info(
+        f"  Num examples = {total_train_steps * train_batch_size * gradient_accumulation_steps}"
+    )
     if not data_args.streaming:
         logger.info(f"  Num epochs = {num_epochs}")
-    logger.info("  Instantaneous batch size per device =" f" {training_args.per_device_train_batch_size}")
-    logger.info("  Gradient accumulation steps =" f" {gradient_accumulation_steps}")
+    logger.info(
+        "  Instantaneous batch size per device ="
+        f" {training_args.per_device_train_batch_size}"
+    )
+    logger.info(f"  Gradient accumulation steps = {gradient_accumulation_steps}")
     logger.info(
         f"  Total train batch size (w. parallel & distributed) = {train_batch_size * gradient_accumulation_steps}"
     )
@@ -1542,7 +2185,10 @@ def main():
     train_time = 0
     train_start = time.time()
     steps_trained_progress_bar = tqdm(
-        range(total_train_steps), desc="Train steps ... ", position=0, disable=not accelerator.is_local_main_process
+        range(total_train_steps),
+        desc="Train steps ... ",
+        position=0,
+        disable=not accelerator.is_local_main_process,
     )
     continue_training = True
     epochs_trained = 0
@@ -1563,29 +2209,32 @@ def main():
         cur_step = int(match.group(1))
         epochs_trained = int(match.group(2))
 
-        logger.info("  Continuing training from checkpoint, will skip to saved global_step")
+        logger.info("  Restoring training state from checkpoint")
         logger.info(f"  Continuing training from epoch {epochs_trained}")
         logger.info(f"  Continuing training from global step {cur_step}")
 
         steps_trained_progress_bar.update(cur_step)
 
-        for epoch in range(0, epochs_trained):
-            vectorized_datasets["train"] = vectorized_datasets["train"].shuffle(training_args.seed)
-
         if not data_args.streaming and training_args.max_steps < 0:
             # we know exactly the number of steps per epoch, so can skip through the required number of batches
-            resume_step = (cur_step - epochs_trained * steps_per_epoch) * gradient_accumulation_steps
+            resume_step = (
+                cur_step - epochs_trained * steps_per_epoch
+            ) * gradient_accumulation_steps
         else:
-            # Currently we don't know how many steps we've taken in the current epoch
-            # So we just shuffle the dataset one extra time and start from a fresh epoch
-            # This is "good enough" for our purposes but not fully correct
+            # The checkpoint does not record the position within this data pass.
+            # Restart the pass in stored order; examples may be repeated on resume.
             resume_step = None
-            vectorized_datasets["train"] = vectorized_datasets["train"].shuffle(training_args.seed)
+            logger.warning(
+                "Data position is not restored; restarting the data pass in stored order."
+            )
     else:
         resume_step = None
 
+    session_start_step = cur_step
+
     for epoch in range(epochs_trained, num_epochs):
-        vectorized_datasets["train"] = vectorized_datasets["train"].shuffle(training_args.seed)
+        # Datasets are shuffled before publication. Preserve their stored order
+        # here to avoid buffering precomputed features before the first batch.
         train_dataloader = DataLoader(
             vectorized_datasets["train"],
             collate_fn=data_collator,
@@ -1595,23 +2244,60 @@ def main():
             pin_memory=training_args.dataloader_pin_memory,
         )
         train_dataloader = accelerator.prepare(train_dataloader)
-        if hasattr(train_dataloader, "dataset") and isinstance(train_dataloader.dataset, IterableDataset):
+        if hasattr(train_dataloader, "dataset") and isinstance(
+            train_dataloader.dataset, IterableDataset
+        ):
             train_dataloader.dataset.set_epoch(epoch)
 
         if resume_step is not None:
             # Skip the first N batches in the dataloader when resuming from a checkpoint
-            train_dataloader = accelerator.skip_first_batches(train_dataloader, resume_step)
+            train_dataloader = accelerator.skip_first_batches(
+                train_dataloader, resume_step
+            )
             resume_step = None
 
+        # PATCH: timing instrumentation to find out whether batch preparation
+        # (network fetch + decode + feature-extraction + tokenize + collate,
+        # everything the `for batch in train_dataloader` line triggers) or the
+        # GPU step itself (train_step: forward + backward) is the actual
+        # bottleneck - see the conversation this was added for. Reported as a
+        # rolling average over each `logging_steps` window, alongside the
+        # existing loss/LR line, so it's easy to compare against wall-clock
+        # behavior without a separate profiling run.
+        _batch_wait_time_sum = 0.0
+        _train_step_time_sum = 0.0
+        _timed_steps = 0
+        _batch_ready_at = time.time()
+
         for batch in train_dataloader:
+            _batch_wait_time_sum += time.time() - _batch_ready_at
+
             with accelerator.accumulate(student_model):
-                loss, train_metric = train_step(batch, temperature=training_args.temperature)
+                _step_start = time.time()
+                loss, train_metric = train_step_fn(
+                    batch, temperature=training_args.temperature
+                )
                 accelerator.backward(loss)
                 if accelerator.sync_gradients:
-                    accelerator.clip_grad_norm_(student_model.parameters(), training_args.max_grad_norm)
+                    accelerator.clip_grad_norm_(
+                        student_model.parameters(), training_args.max_grad_norm
+                    )
                 optimizer.step()
                 lr_scheduler.step()
                 optimizer.zero_grad()
+                if torch.cuda.is_available():
+                    # CUDA ops are async - without this, the "step time" below
+                    # would mostly just measure how fast we could launch
+                    # kernels, not how long the GPU actually took to run them.
+                    torch.cuda.synchronize()
+                _train_step_time_sum += time.time() - _step_start
+                _timed_steps += 1
+
+            # PATCH: reset the "waiting for next batch" clock now, so any
+            # checkpoint-saving/eval work below (rare - only at save_steps/
+            # eval_steps) gets correctly folded into the NEXT iteration's
+            # wait time rather than silently excluded from the measurement.
+            _batch_ready_at = time.time()
 
             # Check if the accelerator has performed an optimization step behind the scenes
             if accelerator.sync_gradients:
@@ -1624,9 +2310,19 @@ def main():
                         f" {train_metric['loss']}, Learning Rate:"
                         f" {lr_scheduler.get_last_lr()[0]})"
                     )
+                    if _timed_steps > 0:
+                        steps_trained_progress_bar.write(
+                            f"  [timing] avg batch_wait={_batch_wait_time_sum / _timed_steps:.3f}s "
+                            f"avg train_step={_train_step_time_sum / _timed_steps:.3f}s "
+                            f"(over last {_timed_steps} steps)"
+                        )
+                    _batch_wait_time_sum = 0.0
+                    _train_step_time_sum = 0.0
+                    _timed_steps = 0
                     log_metric(
                         accelerator,
                         metrics=train_metric,
+                        loss_history_dir=loss_history_dir,
                         learning_rate=lr_scheduler.get_last_lr()[0],
                         train_time=train_time + time.time() - train_start,
                         step=cur_step,
@@ -1635,9 +2331,18 @@ def main():
                     )
 
                 # save checkpoint and weights after each save_steps and at the end of training
-                if (cur_step % training_args.save_steps == 0) or cur_step == total_train_steps:
-                    intermediate_dir = os.path.join(training_args.output_dir, f"checkpoint-{cur_step}-epoch-{epoch}")
+                if (
+                    cur_step % training_args.save_steps == 0
+                ) or cur_step == total_train_steps:
+                    intermediate_dir = os.path.join(
+                        training_args.output_dir, f"checkpoint-{cur_step}-epoch-{epoch}"
+                    )
                     accelerator.save_state(output_dir=intermediate_dir)
+                    if accelerator.is_main_process:
+                        shutil.copy2(
+                            Path(training_args.output_dir) / "run_config.json",
+                            Path(intermediate_dir) / "run_config.json",
+                        )
                     feature_extractor.save_pretrained(intermediate_dir)
                     tokenizer.save_pretrained(intermediate_dir)
                     config.save_pretrained(intermediate_dir)
@@ -1645,7 +2350,10 @@ def main():
 
                     accelerator.wait_for_everyone()
                     if accelerator.is_main_process:
-                        rotate_checkpoints(training_args.save_total_limit, output_dir=training_args.output_dir)
+                        rotate_checkpoints(
+                            training_args.save_total_limit,
+                            output_dir=training_args.output_dir,
+                        )
 
                         if training_args.push_to_hub:
                             upload_folder(
@@ -1655,7 +2363,9 @@ def main():
                                 commit_message=f"Saving train state of step {cur_step}",
                             )
 
-                if training_args.do_eval and (cur_step % eval_steps == 0 or cur_step == total_train_steps):
+                if training_args.do_eval and (
+                    cur_step % eval_steps == 0 or cur_step == total_train_steps
+                ):
                     train_time += time.time() - train_start
                     student_model.eval()
                     wer_l, labels_l = [], []
@@ -1665,6 +2375,7 @@ def main():
                         eval_preds = []
                         eval_labels = []
                         eval_start = time.time()
+                        evaluation_timer = time.perf_counter()
 
                         validation_dataloader = DataLoader(
                             vectorized_datasets[eval_split],
@@ -1675,16 +2386,41 @@ def main():
                             prefetch_factor=prefetch_factor,
                             pin_memory=training_args.dataloader_pin_memory,
                         )
-                        validation_dataloader = accelerator.prepare(validation_dataloader)
+                        validation_dataloader = accelerator.prepare(
+                            validation_dataloader
+                        )
+
+                        if data_args.streaming:
+                            count = eval_sample_counts.get(eval_split)
+                            total_eval_batches = (
+                                math.ceil(
+                                    count
+                                    / (
+                                        per_device_eval_batch_size
+                                        * accelerator.num_processes
+                                    )
+                                )
+                                if count is not None
+                                else None
+                            )
+                        else:
+                            total_eval_batches = len(validation_dataloader)
 
                         for batch in tqdm(
                             validation_dataloader,
-                            desc=f"Evaluating {eval_split}...",
+                            total=total_eval_batches,
+                            desc=f"Evaluating {eval_split}"
+                            + (
+                                " (estimated total)"
+                                if data_args.streaming
+                                and total_eval_batches is not None
+                                else ""
+                            ),
                             position=2,
                             disable=not accelerator.is_local_main_process,
                         ):
                             # Model forward
-                            eval_metric = eval_step(batch)
+                            eval_metric = eval_step_fn(batch)
                             eval_metric = accelerator.gather_for_metrics(eval_metric)
                             eval_metrics.append(eval_metric)
 
@@ -1701,26 +2437,37 @@ def main():
                         eval_time = time.time() - eval_start
                         # normalize eval metrics
                         eval_metrics = {
-                            key: torch.mean(torch.stack([d[key] for d in eval_metrics])) for key in eval_metrics[0]
+                            key: torch.mean(torch.stack([d[key] for d in eval_metrics]))
+                            for key in eval_metrics[0]
                         }
 
                         # compute WER metric
                         wer_desc = ""
                         if training_args.predict_with_generate:
-                            wer_metric, pred_str, label_str, norm_pred_str, norm_label_str = compute_metrics(
-                                eval_preds, eval_labels
-                            )
-                            eval_metrics.update(wer_metric)
-                            wer_desc = " ".join([f"Eval {key}: {value} |" for key, value in wer_metric.items()])
-                            log_pred(
-                                accelerator,
+                            (
+                                wer_metric,
                                 pred_str,
                                 label_str,
                                 norm_pred_str,
                                 norm_label_str,
-                                step=cur_step,
-                                prefix=eval_split,
+                            ) = compute_metrics(eval_preds, eval_labels)
+                            eval_metrics.update(wer_metric)
+                            wer_desc = " ".join(
+                                [
+                                    f"Eval {key}: {value} |"
+                                    for key, value in wer_metric.items()
+                                ]
                             )
+                            if "wandb" in training_args.report_to:
+                                log_pred(
+                                    accelerator,
+                                    pred_str,
+                                    label_str,
+                                    norm_pred_str,
+                                    norm_label_str,
+                                    step=cur_step,
+                                    prefix=eval_split,
+                                )
 
                         # Print metrics and update progress bar
                         steps_trained_progress_bar.write(
@@ -1728,57 +2475,85 @@ def main():
                             f" {wer_desc})"
                         )
 
-                        wer_l.append(wer_metric)
-                        labels_l.append(norm_label_str)
+                        if training_args.predict_with_generate:
+                            wer_l.append(wer_metric)
+                            labels_l.append(norm_label_str)
 
                         log_metric(
                             accelerator,
                             metrics=eval_metrics,
+                            learning_rate=lr_scheduler.get_last_lr()[0],
+                            loss_history_dir=loss_history_dir,
                             train_time=eval_time,
                             step=cur_step,
                             epoch=epoch,
                             prefix=eval_split,
                         )
 
+                        session_evaluation_seconds += time.perf_counter() - evaluation_timer
+
                     # flush the train metrics
                     train_start = time.time()
 
-                    # save best checkpoint
-                    numerators = [wer['wer'] * len(labs) for wer, labs in zip(wer_l, labels_l)] 
-                    val_wer = sum(numerators) / sum(len(labs) for labs in labels_l)
+                    # Best-WER checkpoints require generated predictions.
+                    if training_args.predict_with_generate:
+                        # save best checkpoint
+                        numerators = [
+                            wer["wer"] * len(labs) for wer, labs in zip(wer_l, labels_l)
+                        ]
+                        val_wer = sum(numerators) / sum(len(labs) for labs in labels_l)
 
-                    if val_wer < best_val_wer:
-                        intermediate_dir = os.path.join(training_args.output_dir, f"checkpoint-{cur_step}-epoch-{epoch}-val-wer-{val_wer:.3f}")
-                        logger.info(f"Saving new best model, validation WER: {val_wer:.3f}")  
-                        accelerator.save_state(output_dir=intermediate_dir)
-                        feature_extractor.save_pretrained(intermediate_dir)
-                        tokenizer.save_pretrained(intermediate_dir)
-                        config.save_pretrained(intermediate_dir)
-                        student_model.generation_config.save_pretrained(intermediate_dir)
-
-                        accelerator.wait_for_everyone()
-
-                        # remove unnecesary checkpoints, save best model and push to hub
-                        if accelerator.is_main_process:
-                            rotate_checkpoints(training_args.save_best_total_limit, output_dir=training_args.output_dir, sorting_fn=sorted_best_checkpoints)
-                            
-                            accelerator.unwrap_model(student_model).save_pretrained(training_args.output_dir)
-
-                            if training_args.push_to_hub:
-                                upload_folder(
-                                    folder_path=training_args.output_dir,
-                                    repo_id=repo_name,
-                                    repo_type="model",
-                                    commit_message=f"Saving best state, step {cur_step}, val wer {val_wer:.3f}",
+                        if val_wer < best_val_wer:
+                            intermediate_dir = os.path.join(
+                                training_args.output_dir,
+                                f"checkpoint-{cur_step}-epoch-{epoch}-val-wer-{val_wer:.3f}",
+                            )
+                            logger.info(
+                                f"Saving new best model, validation WER: {val_wer:.3f}"
+                            )
+                            accelerator.save_state(output_dir=intermediate_dir)
+                            if accelerator.is_main_process:
+                                shutil.copy2(
+                                    Path(training_args.output_dir) / "run_config.json",
+                                    Path(intermediate_dir) / "run_config.json",
                                 )
-                                
-                        best_val_wer = val_wer
+                            feature_extractor.save_pretrained(intermediate_dir)
+                            tokenizer.save_pretrained(intermediate_dir)
+                            config.save_pretrained(intermediate_dir)
+                            student_model.generation_config.save_pretrained(
+                                intermediate_dir
+                            )
+
+                            accelerator.wait_for_everyone()
+
+                            # remove unnecesary checkpoints, save best model and push to hub
+                            if accelerator.is_main_process:
+                                rotate_checkpoints(
+                                    training_args.save_best_total_limit,
+                                    output_dir=training_args.output_dir,
+                                    sorting_fn=sorted_best_checkpoints,
+                                )
+
+                                accelerator.unwrap_model(student_model).save_pretrained(
+                                    training_args.output_dir
+                                )
+
+                                if training_args.push_to_hub:
+                                    upload_folder(
+                                        folder_path=training_args.output_dir,
+                                        repo_id=repo_name,
+                                        repo_type="model",
+                                        commit_message=f"Saving best state, step {cur_step}, val wer {val_wer:.3f}",
+                                    )
+
+                            best_val_wer = val_wer
 
                 # break condition
                 if cur_step == total_train_steps:
-
-                    # the model under training_args.output_dir is the best model, let's also save end of training weights 
-                    final_weights_dir = os.path.join(training_args.output_dir, "end-of-training-weights")
+                    # the model under training_args.output_dir is the best model, let's also save end of training weights
+                    final_weights_dir = os.path.join(
+                        training_args.output_dir, "end-of-training-weights"
+                    )
 
                     feature_extractor.save_pretrained(final_weights_dir)
                     tokenizer.save_pretrained(final_weights_dir)
@@ -1805,6 +2580,26 @@ def main():
             break
 
     accelerator.end_training()
+    accelerator.wait_for_everyone()
+    if accelerator.is_main_process:
+        # Keep each execution separately: a resumed run only measures time spent
+        # in this session. Earlier sessions cannot be reconstructed from checkpoints.
+        summary_path = Path(training_args.output_dir) / "run_summary.json"
+        sessions = json.loads(summary_path.read_text()) if summary_path.exists() else []
+        sessions.append({
+            "started_at": session_started_at,
+            "finished_at": datetime.now(timezone.utc).isoformat(),
+            "start_step": session_start_step,
+            "completed_steps": cur_step,
+            "steps_this_session": cur_step - session_start_step,
+            "resume_from_checkpoint": str(checkpoint) if checkpoint is not None else None,
+            "total_wall_time_seconds": time.perf_counter() - session_start,
+            "evaluation_time_seconds": session_evaluation_seconds,
+        })
+        temporary_path = summary_path.with_suffix(".json.tmp")
+        temporary_path.write_text(json.dumps(sessions, indent=2) + "\n")
+        temporary_path.replace(summary_path)
+
 
 
 if __name__ == "__main__":
