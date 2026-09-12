@@ -36,6 +36,7 @@ import torch.nn as nn
 from typing import Any
 from pathlib import Path
 from functools import partial
+from collections import deque
 from accelerate import Accelerator
 from accelerate.utils import set_seed
 from datetime import datetime, timezone
@@ -742,7 +743,7 @@ def load_multiple_datasets(
     text_column_names: list | None = None,
     sampling_rate: int | None = 16000,
     stopping_strategy: str | None = "first_exhausted",
-    dataset_samples: list | np.array | None = None,
+    dataset_samples: list | np.ndarray | None = None,
     streaming: bool | None = True,
     seed: int | None = None,
     accelerator: Accelerator | None = None,
@@ -2292,7 +2293,7 @@ def main():
             )
             resume_step = None
 
-        # PATCH: timing instrumentation to find out whether batch preparation
+        # NOTE: timing instrumentation to find out whether batch preparation
         # (network fetch + decode + feature-extraction + tokenize + collate,
         # everything the `for batch in train_dataloader` line triggers) or the
         # GPU step itself (train_step: forward + backward) is the actual
@@ -2305,7 +2306,7 @@ def main():
         _timed_steps = 0
         _batch_ready_at = time.time()
 
-        for batch in train_dataloader:
+        for batch in prefetch_iter(train_dataloader, num_prefetch=2):
             _batch_wait_time_sum += time.time() - _batch_ready_at
 
             with accelerator.accumulate(student_model):
