@@ -940,24 +940,24 @@ def get_parameter_names(model, forbidden_layer_types, forbidden_module=None):
 
 
 def prepare_train_dataset(
-    batch,
-    feature_extractor,
-    teacher_feature_extractor,
-    same_feature_extractor,
-    sampling_rate,
-    spec_augment_policy,
-    train_text_column_name,
-    use_pseudo_labels,
-    timestamp_ids,
-    timestamp_probability,
-    timestamp_begin,
-    timestamp_position,
-    condition_on_prev_probability,
-    prompt_cutoff_length,
-    max_label_length,
-    decoder_prev_token_id,
-    tokenizer,
-):
+    batch: Dict[str, list],
+    feature_extractor: WhisperFeatureExtractor,
+    teacher_feature_extractor: WhisperFeatureExtractor,
+    same_feature_extractor: bool,
+    sampling_rate: int,
+    spec_augment_policy: str,
+    train_text_column_name: str,
+    use_pseudo_labels: bool,
+    timestamp_ids: List[int],
+    timestamp_probability: float,
+    timestamp_begin: int,
+    timestamp_position: int,
+    condition_on_prev_probability: float,
+    prompt_cutoff_length: int,
+    max_label_length: int,
+    decoder_prev_token_id: int,
+    tokenizer: WhisperTokenizerFast,
+) -> Dict[str, list]:
     """
     Pre-process the raw dataset in a three stage process:
         1. Convert the audio arrays to log-mel spectrogram inputs
@@ -974,16 +974,12 @@ def prepare_train_dataset(
     # only when actually needed (see same_feature_extractor), to avoid
     # paying for a second, redundant mel-spectrogram pass every example.
     if not same_feature_extractor:
-        teacher_inputs = teacher_feature_extractor(
-            audio, sampling_rate=sampling_rate
-        )
+        teacher_inputs = teacher_feature_extractor(audio, sampling_rate=sampling_rate)
         batch["teacher_input_features"] = teacher_inputs.input_features
 
     if spec_augment_policy != "none":
         if feature_extractor.hop_length != teacher_feature_extractor.hop_length:
-            raise ValueError(
-                "Coordinated augmentation requires matching frame spacing"
-            )
+            raise ValueError("Coordinated augmentation requires matching frame spacing")
         for i, waveform in enumerate(audio):
             student_features = batch["input_features"][i]
             teacher_features = (
@@ -1029,9 +1025,7 @@ def prepare_train_dataset(
     # explicit, and added the missing branch: use the dataset's own
     # precomputed previous-text column when it says this row has one.
     has_own_condition_on_prev = "condition_on_prev" in batch
-    prev_text_column = (
-        "prev_whisper_transcript" if use_pseudo_labels else "prev_text"
-    )
+    prev_text_column = "prev_whisper_transcript" if use_pseudo_labels else "prev_text"
     prev_text_batched = batch.get(prev_text_column, len(input_str_batched) * [None])
 
     all_token_ids = []
@@ -1050,16 +1044,12 @@ def prepare_train_dataset(
             predict_timestamps = bool(np.random.binomial(1, timestamp_probability))
             if not predict_timestamps:
                 # filter timestamps and insert the <|notimestamps|> task token
-                token_ids = [
-                    token for token in token_ids if token < timestamp_begin
-                ]
+                token_ids = [token for token in token_ids if token < timestamp_begin]
                 token_ids.insert(timestamp_position, timestamp_begin)
 
         all_token_ids_unprompted.append(token_ids)
         # check whether to condition on previous text - we do this with probability condition_on_prev_probability
-        condition_on_prev = bool(
-            np.random.binomial(1, condition_on_prev_probability)
-        )
+        condition_on_prev = bool(np.random.binomial(1, condition_on_prev_probability))
         prev_ids = None
         if condition_on_prev:
             if has_own_condition_on_prev:
@@ -1098,17 +1088,15 @@ def prepare_train_dataset(
 
 
 def prepare_eval_dataset(
-    batch,
-    feature_extractor,
-    teacher_feature_extractor,
-    same_feature_extractor,
-    tokenizer,
-):
+    batch: Dict[str, Any],
+    feature_extractor: WhisperFeatureExtractor,
+    teacher_feature_extractor: WhisperFeatureExtractor,
+    same_feature_extractor: bool,
+    tokenizer: WhisperTokenizerFast,
+) -> Dict[str, Any]:
     # process audio input
     sample = batch["audio"]
-    inputs = feature_extractor(
-        sample["array"], sampling_rate=sample["sampling_rate"]
-    )
+    inputs = feature_extractor(sample["array"], sampling_rate=sample["sampling_rate"])
     batch["input_features"] = inputs.input_features[0]
     batch["input_length"] = len(sample["array"])
     # PATCH: separate feature extraction for the teacher (see prepare_train_dataset).
@@ -1124,7 +1112,11 @@ def prepare_eval_dataset(
     return batch
 
 
-def kl_divergence(target_distribution, log_predicted_distribution, labels):
+def kl_divergence(
+    target_distribution: torch.Tensor,
+    log_predicted_distribution: torch.Tensor,
+    labels: torch.Tensor,
+) -> torch.Tensor:
     kl_loss = nn.KLDivLoss(reduction="none")
     divergence = kl_loss(log_predicted_distribution, target_distribution)
     # ignore padded tokens from divergence, i.e. where labels are not set to -100
@@ -1138,14 +1130,14 @@ def kl_divergence(target_distribution, log_predicted_distribution, labels):
 
 # Define gradient update step fn
 def train_step(
-    batch,
-    student_model,
-    teacher_model,
-    share_hidden_states,
-    teacher_dtype,
-    kl_weight,
-    temperature=2.0,
-):
+    batch: Dict[str, torch.Tensor],
+    student_model: WhisperForConditionalGeneration,
+    teacher_model: WhisperForConditionalGeneration,
+    share_hidden_states: bool,
+    teacher_dtype: torch.dtype,
+    kl_weight: float,
+    temperature: float = 2.0,
+) -> tuple[torch.Tensor, Dict[str, torch.Tensor]]:
     student_model.train()
     teacher_model.eval()
 
@@ -1200,13 +1192,13 @@ def train_step(
 
 # Define eval fn
 def eval_step(
-    batch,
-    student_model,
-    teacher_model,
-    share_hidden_states,
-    teacher_dtype,
-    kl_weight,
-):
+    batch: Dict[str, torch.Tensor],
+    student_model: WhisperForConditionalGeneration,
+    teacher_model: WhisperForConditionalGeneration,
+    share_hidden_states: bool,
+    teacher_dtype: torch.dtype,
+    kl_weight: float,
+) -> Dict[str, torch.Tensor]:
     student_model.eval()
     teacher_model.eval()
 
@@ -1237,14 +1229,29 @@ def eval_step(
     student_distribution = nn.functional.log_softmax(student_outputs.logits, dim=-1)
     teacher_distribution = nn.functional.softmax(teacher_outputs.logits, dim=-1)
     # temperature is always 1 for eval
-    kl_loss = kl_divergence(
-        teacher_distribution, student_distribution, batch["labels"]
-    )
+    kl_loss = kl_divergence(teacher_distribution, student_distribution, batch["labels"])
 
     # use Distil-Whisper formulation (fix weight of CE loss and tune KL weight)
     loss = 0.8 * ce_loss + kl_weight * kl_loss
     metrics = {"loss": loss, "ce_loss": ce_loss, "kl_loss": kl_loss}
     return metrics
+
+
+def generate_step(
+    batch: Dict[str, torch.Tensor],
+    student_model: WhisperForConditionalGeneration,
+    accelerator: Accelerator,
+    gen_kwargs: Dict[str, Any],
+    tokenizer: WhisperTokenizerFast,
+) -> torch.Tensor:
+    student_model.eval()
+    output_ids = accelerator.unwrap_model(student_model).generate(
+        batch["input_features"], **gen_kwargs
+    )
+    output_ids = accelerator.pad_across_processes(
+        output_ids, dim=1, pad_index=tokenizer.pad_token_id
+    )
+    return output_ids
 
 
 def main():
@@ -2155,15 +2162,13 @@ def main():
         kl_weight=training_args.kl_weight,
     )
 
-    def generate_step(batch):
-        student_model.eval()
-        output_ids = accelerator.unwrap_model(student_model).generate(
-            batch["input_features"], **gen_kwargs
-        )
-        output_ids = accelerator.pad_across_processes(
-            output_ids, dim=1, pad_index=tokenizer.pad_token_id
-        )
-        return output_ids
+    generate_step_fn = partial(
+        generate_step,
+        student_model=student_model,
+        accelerator=accelerator,
+        gen_kwargs=gen_kwargs,
+        tokenizer=tokenizer,
+    )
 
     logger.info("***** Running training *****")
     logger.info(
@@ -2426,7 +2431,7 @@ def main():
 
                             # generation
                             if training_args.predict_with_generate:
-                                generated_ids = generate_step(batch)
+                                generated_ids = generate_step_fn(batch)
                                 # Gather all predictions and targets
                                 generated_ids, labels = accelerator.gather_for_metrics(
                                     (generated_ids, batch["labels"])
@@ -2490,7 +2495,9 @@ def main():
                             prefix=eval_split,
                         )
 
-                        session_evaluation_seconds += time.perf_counter() - evaluation_timer
+                        session_evaluation_seconds += (
+                            time.perf_counter() - evaluation_timer
+                        )
 
                     # flush the train metrics
                     train_start = time.time()
@@ -2586,20 +2593,23 @@ def main():
         # in this session. Earlier sessions cannot be reconstructed from checkpoints.
         summary_path = Path(training_args.output_dir) / "run_summary.json"
         sessions = json.loads(summary_path.read_text()) if summary_path.exists() else []
-        sessions.append({
-            "started_at": session_started_at,
-            "finished_at": datetime.now(timezone.utc).isoformat(),
-            "start_step": session_start_step,
-            "completed_steps": cur_step,
-            "steps_this_session": cur_step - session_start_step,
-            "resume_from_checkpoint": str(checkpoint) if checkpoint is not None else None,
-            "total_wall_time_seconds": time.perf_counter() - session_start,
-            "evaluation_time_seconds": session_evaluation_seconds,
-        })
+        sessions.append(
+            {
+                "started_at": session_started_at,
+                "finished_at": datetime.now(timezone.utc).isoformat(),
+                "start_step": session_start_step,
+                "completed_steps": cur_step,
+                "steps_this_session": cur_step - session_start_step,
+                "resume_from_checkpoint": str(checkpoint)
+                if checkpoint is not None
+                else None,
+                "total_wall_time_seconds": time.perf_counter() - session_start,
+                "evaluation_time_seconds": session_evaluation_seconds,
+            }
+        )
         temporary_path = summary_path.with_suffix(".json.tmp")
         temporary_path.write_text(json.dumps(sessions, indent=2) + "\n")
         temporary_path.replace(summary_path)
-
 
 
 if __name__ == "__main__":

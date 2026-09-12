@@ -1,4 +1,4 @@
-.PHONY: quality style
+.PHONY: quality stylegenerate_step
 
 quality:
 	ruff check .
