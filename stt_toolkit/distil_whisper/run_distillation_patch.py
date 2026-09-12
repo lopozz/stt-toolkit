@@ -16,33 +16,37 @@
 """
 Training the Whisper model for sequence to sequence speech recognition via teacher-student distillation.
 """
-# You can also adapt this script for your own distillation tasks. Pointers for this are left as comments.
 
-import logging
-import json
-import math
 import os
 import re
-import shutil
 import sys
 import time
-from datetime import datetime, timezone
-from dataclasses import asdict, dataclass, field, fields
-from functools import partial
-from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
-
-from spec_augment import SPEC_AUGMENT_PRESETS, spec_augment_pair
-
+import json
+import math
+import torch
+import shutil
+import logging
 import datasets
 import evaluate
-import numpy as np
-import torch
-import torch.nn as nn
 import transformers
+
+import numpy as np
+import torch.nn as nn
+
+from typing import Any
+from pathlib import Path
+from functools import partial
 from accelerate import Accelerator
-from accelerate.logging import get_logger
 from accelerate.utils import set_seed
+from datetime import datetime, timezone
+from accelerate.logging import get_logger
+from transformers.utils import check_min_version
+from concurrent.futures import ThreadPoolExecutor
+from transformers.utils.versions import require_version
+from dataclasses import asdict, dataclass, field, fields
+from transformers.modeling_outputs import BaseModelOutput
+from spec_augment import SPEC_AUGMENT_PRESETS, spec_augment_pair
+
 from datasets import (
     DatasetDict,
     IterableDataset,
@@ -65,13 +69,11 @@ from transformers import (
     WhisperTokenizerFast,
     get_scheduler,
 )
-from transformers.modeling_outputs import BaseModelOutput
+
 from transformers.models.whisper.english_normalizer import (
     BasicTextNormalizer,
     EnglishTextNormalizer,
 )
-from transformers.utils import check_min_version
-from transformers.utils.versions import require_version
 
 
 # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
@@ -98,25 +100,25 @@ class ModelArguments:
             "help": "Path to pretrained teacher model or model identifier from huggingface.co/models"
         }
     )
-    config_name: Optional[str] = field(
+    config_name: str | None = field(
         default=None,
         metadata={
             "help": "Pretrained config name or path if not the same as model_name"
         },
     )
-    tokenizer_name: Optional[str] = field(
+    tokenizer_name: str | None = field(
         default=None,
         metadata={
             "help": "Pretrained tokenizer name or path if not the same as model_name"
         },
     )
-    feature_extractor_name: Optional[str] = field(
+    feature_extractor_name: str | None = field(
         default=None,
         metadata={
             "help": "feature extractor name or path if not the same as model_name"
         },
     )
-    cache_dir: Optional[str] = field(
+    cache_dir: str | None = field(
         default=None,
         metadata={
             "help": "Where to store the pretrained models downloaded from huggingface.co"
@@ -150,7 +152,7 @@ class ModelArguments:
             )
         },
     )
-    attn_implementation: Optional[str] = field(
+    attn_implementation: str | None = field(
         default=None,
         metadata={
             "help": (
@@ -192,7 +194,7 @@ class DataTrainingArguments:
             "help": "Training augmentation: none, lb_no_warp, ld_no_warp, lb, ld."
         },
     )
-    train_dataset_config_name: Optional[str] = field(
+    train_dataset_config_name: str | None = field(
         default=None,
         metadata={
             "help": "The configuration name of the training dataset to use (via the datasets library). Load and combine "
@@ -217,14 +219,14 @@ class DataTrainingArguments:
             "ids by a '+' symbol."
         },
     )
-    eval_dataset_config_name: Optional[str] = field(
+    eval_dataset_config_name: str | None = field(
         default=None,
         metadata={
             "help": "The configuration name of the evaluation dataset to use (via the datasets library). Defaults to the "
             "training dataset config name if unspecified."
         },
     )
-    dataset_cache_dir: Optional[str] = field(
+    dataset_cache_dir: str | None = field(
         default=None,
         metadata={"help": "Path to cache directory for saving and loading datasets"},
     )
@@ -232,19 +234,19 @@ class DataTrainingArguments:
         default=False,
         metadata={"help": "Overwrite the cached training and evaluation sets"},
     )
-    preprocessing_num_workers: Optional[int] = field(
+    preprocessing_num_workers: int | None = field(
         default=None,
         metadata={
             "help": "The number of processes to use for the preprocessing if using non-streaming mode."
         },
     )
-    preprocessing_batch_size: Optional[int] = field(
+    preprocessing_batch_size: int | None = field(
         default=256,
         metadata={
             "help": "Number of examples per batch provided to the `prepare_dataset` function."
         },
     )
-    max_train_samples: Optional[int] = field(
+    max_train_samples: int | None = field(
         default=None,
         metadata={
             "help": (
@@ -252,7 +254,7 @@ class DataTrainingArguments:
             )
         },
     )
-    max_eval_samples: Optional[int] = field(
+    max_eval_samples: int | None = field(
         default=None,
         metadata={
             "help": (
@@ -298,7 +300,7 @@ class DataTrainingArguments:
             "help": "Truncate transcriptions that are longer `max_label_length` tokens."
         },
     )
-    pad_target_to_multiple_of: Optional[int] = field(
+    pad_target_to_multiple_of: int | None = field(
         default=None,
         metadata={
             "help": (
@@ -406,7 +408,7 @@ class DataTrainingArguments:
 
 @dataclass
 class DistillationTrainingArguments(Seq2SeqTrainingArguments):
-    freeze_encoder: Optional[bool] = field(
+    freeze_encoder: bool | None = field(
         default=False,
         metadata={
             "help": (
@@ -415,7 +417,7 @@ class DistillationTrainingArguments(Seq2SeqTrainingArguments):
             )
         },
     )
-    freeze_decoder: Optional[bool] = field(
+    freeze_decoder: bool | None = field(
         default=False,
         metadata={
             "help": (
@@ -423,17 +425,17 @@ class DistillationTrainingArguments(Seq2SeqTrainingArguments):
             )
         },
     )
-    freeze_embed_positions: Optional[bool] = field(
+    freeze_embed_positions: bool | None = field(
         default=False,
         metadata={"help": "Whether to freeze the decoder embedding positions."},
     )
-    temperature: Optional[float] = field(
+    temperature: float | None = field(
         default=2.0,
         metadata={
             "help": "Temperature to anneal the logits when computing the softmax."
         },
     )
-    kl_weight: Optional[float] = field(
+    kl_weight: float | None = field(
         default=1.0,
         metadata={
             "help": (
@@ -442,7 +444,7 @@ class DistillationTrainingArguments(Seq2SeqTrainingArguments):
             )
         },
     )
-    dtype: Optional[str] = field(
+    dtype: str | None = field(
         default="float32",
         metadata={
             "help": (
@@ -451,7 +453,7 @@ class DistillationTrainingArguments(Seq2SeqTrainingArguments):
             )
         },
     )
-    save_best_total_limit: Optional[int] = field(
+    save_best_total_limit: int | None = field(
         default=1, metadata={"help": ("Number of best models to be saved.")}
     )
 
@@ -486,16 +488,16 @@ class DataCollatorSpeechSeq2SeqWithPadding:
     processor: Any
     decoder_start_token_id: int
     decoder_prev_token_id: int
-    input_padding: Union[bool, str] = "max_length"
-    target_padding: Union[bool, str] = "max_length"
-    max_target_length: Optional[int] = None
+    input_padding: bool | str = "max_length"
+    target_padding: bool | str = "max_length"
+    max_target_length: int | None = None
     # PATCH: the teacher's own feature extractor, used to pad `teacher_input_features`
     # (see the NOTE on teacher_feature_extractor's loading in main()).
     teacher_feature_extractor: Any = None
 
     def __call__(
-        self, features: List[Dict[str, Union[List[int], np.ndarray]]]
-    ) -> Dict[str, np.ndarray]:
+        self, features: list[dict[str, list[int] | np.ndarray]]
+    ) -> dict[str, np.ndarray]:
         # split inputs and labels since they have to be of different lengths and need
         # different padding methods
 
@@ -582,13 +584,13 @@ def save_loss(output_dir, step, loss, prefix, learning_rate=None):
 
 def log_metric(
     accelerator,
-    metrics: Dict,
+    metrics: dict,
     train_time: float,
     step: int,
     epoch: int,
     learning_rate: float = None,
     prefix: str = "train",
-    loss_history_dir: Optional[str] = None,
+    loss_history_dir: str | None = None,
 ):
     """Helper function to log all training/evaluation metrics with the correct prefixes and styling."""
     log_metrics = {}
@@ -605,10 +607,10 @@ def log_metric(
 
 def log_pred(
     accelerator,
-    pred_str: List[str],
-    label_str: List[str],
-    norm_pred_str: List[str],
-    norm_label_str: List[str],
+    pred_str: list[str],
+    label_str: list[str],
+    norm_pred_str: list[str],
+    norm_label_str: list[str],
     step: int,
     prefix: str = "eval",
     num_lines: int = 200000,
@@ -652,7 +654,7 @@ def convert_dataset_str_to_list(
     text_column_names=None,
     dataset_samples=None,
     default_split="train",
-) -> List[Dict]:
+) -> list[dict]:
     """
     Given three lists of dataset names, configs and splits, this function groups the corresponding
     names/configs/splits. Each dataset is assigned a unique dictionary with these metadata values, and the
@@ -734,16 +736,16 @@ def convert_dataset_str_to_list(
 
 
 def load_multiple_datasets(
-    dataset_names: Union[List, str],
-    dataset_config_names: Union[List, str],
-    splits: Optional[Union[List, str]] = None,
-    text_column_names: Optional[List] = None,
-    sampling_rate: Optional[int] = 16000,
-    stopping_strategy: Optional[str] = "first_exhausted",
-    dataset_samples: Optional[Union[List, np.array]] = None,
-    streaming: Optional[bool] = True,
-    seed: Optional[int] = None,
-    accelerator: Optional[Accelerator] = None,
+    dataset_names: list | str,
+    dataset_config_names: list | str,
+    splits: list | str | None = None,
+    text_column_names: list | None = None,
+    sampling_rate: int | None = 16000,
+    stopping_strategy: str | None = "first_exhausted",
+    dataset_samples: list | np.array | None = None,
+    streaming: bool | None = True,
+    seed: int | None = None,
+    accelerator: Accelerator | None = None,
     use_pseudo_labels: float = None,
     **kwargs,
 ) -> IterableDataset:
@@ -830,7 +832,7 @@ def load_multiple_datasets(
     return interleaved_dataset
 
 
-def sorted_checkpoints(output_dir=None, checkpoint_prefix="checkpoint") -> List[str]:
+def sorted_checkpoints(output_dir=None, checkpoint_prefix="checkpoint") -> list[str]:
     """Helper function to sort saved checkpoints from oldest to newest."""
     ordering_and_checkpoint_path = []
 
@@ -940,7 +942,7 @@ def get_parameter_names(model, forbidden_layer_types, forbidden_module=None):
 
 
 def prepare_train_dataset(
-    batch: Dict[str, list],
+    batch: dict[str, list],
     feature_extractor: WhisperFeatureExtractor,
     teacher_feature_extractor: WhisperFeatureExtractor,
     same_feature_extractor: bool,
@@ -948,7 +950,7 @@ def prepare_train_dataset(
     spec_augment_policy: str,
     train_text_column_name: str,
     use_pseudo_labels: bool,
-    timestamp_ids: List[int],
+    timestamp_ids: list[int],
     timestamp_probability: float,
     timestamp_begin: int,
     timestamp_position: int,
@@ -957,7 +959,7 @@ def prepare_train_dataset(
     max_label_length: int,
     decoder_prev_token_id: int,
     tokenizer: WhisperTokenizerFast,
-) -> Dict[str, list]:
+) -> dict[str, list]:
     """
     Pre-process the raw dataset in a three stage process:
         1. Convert the audio arrays to log-mel spectrogram inputs
@@ -1013,7 +1015,7 @@ def prepare_train_dataset(
     condition_on_prev_batched = batch.get(
         "condition_on_prev", len(input_str_batched) * [None]
     )
-    # PATCH: bug fix. The original code reused `prev_ids` as the loop variable
+    # NOTE: bug fix. The original code reused `prev_ids` as the loop variable
     # bound to condition_on_prev_batched (so, when a dataset provides its own
     # `condition_on_prev` column, `prev_ids` started out as a raw bool). It was
     # only ever reassigned to real token ids in two cases - random draw is
@@ -1088,12 +1090,12 @@ def prepare_train_dataset(
 
 
 def prepare_eval_dataset(
-    batch: Dict[str, Any],
+    batch: dict[str, Any],
     feature_extractor: WhisperFeatureExtractor,
     teacher_feature_extractor: WhisperFeatureExtractor,
     same_feature_extractor: bool,
     tokenizer: WhisperTokenizerFast,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     # process audio input
     sample = batch["audio"]
     inputs = feature_extractor(sample["array"], sampling_rate=sample["sampling_rate"])
@@ -1130,18 +1132,18 @@ def kl_divergence(
 
 # Define gradient update step fn
 def train_step(
-    batch: Dict[str, torch.Tensor],
+    batch: dict[str, torch.Tensor],
     student_model: WhisperForConditionalGeneration,
     teacher_model: WhisperForConditionalGeneration,
     share_hidden_states: bool,
     teacher_dtype: torch.dtype,
     kl_weight: float,
     temperature: float = 2.0,
-) -> tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     student_model.train()
     teacher_model.eval()
 
-    # PATCH: `batch` may carry `teacher_input_features` (a separately-extracted
+    # NOTE: `batch` may carry `teacher_input_features` (a separately-extracted
     # tensor for the teacher's own mel-bin count) alongside `input_features`
     # (the student's). Pop it out before calling the student - it wouldn't
     # recognize that kwarg - and swap it in for the teacher's own call below.
@@ -1192,13 +1194,13 @@ def train_step(
 
 # Define eval fn
 def eval_step(
-    batch: Dict[str, torch.Tensor],
+    batch: dict[str, torch.Tensor],
     student_model: WhisperForConditionalGeneration,
     teacher_model: WhisperForConditionalGeneration,
     share_hidden_states: bool,
     teacher_dtype: torch.dtype,
     kl_weight: float,
-) -> Dict[str, torch.Tensor]:
+) -> dict[str, torch.Tensor]:
     student_model.eval()
     teacher_model.eval()
 
@@ -1238,10 +1240,10 @@ def eval_step(
 
 
 def generate_step(
-    batch: Dict[str, torch.Tensor],
+    batch: dict[str, torch.Tensor],
     student_model: WhisperForConditionalGeneration,
     accelerator: Accelerator,
-    gen_kwargs: Dict[str, Any],
+    gen_kwargs: dict[str, Any],
     tokenizer: WhisperTokenizerFast,
 ) -> torch.Tensor:
     student_model.eval()
@@ -1347,7 +1349,7 @@ def main():
 
     # 4. Detecting last checkpoint and eventually continue from last checkpoint
     last_checkpoint = None
-    # PATCH: `overwrite_output_dir` was removed from TrainingArguments in newer
+    # NOTE: `overwrite_output_dir` was removed from TrainingArguments in newer
     # transformers versions (we're on 5.12.1, this script predates that), so
     # there's no longer any way to pass True for it via the CLI. That combined
     # with `Accelerator(project_dir=output_dir, ...)`/`init_trackers(...)` a few
@@ -1530,7 +1532,7 @@ def main():
         revision=model_args.model_revision,
         token=model_args.token,
     )
-    # PATCH: separate feature extraction for the teacher. Whisper-large-v3 uses
+    # NOTE: separate feature extraction for the teacher. Whisper-large-v3 uses
     # 128 mel bins where every other Whisper size uses 80 - the original script
     # computed ONE `input_features` tensor (from the student's feature
     # extractor) and fed it to both models, which crashes if student and
@@ -1574,7 +1576,7 @@ def main():
         torch_dtype=teacher_dtype,
         attn_implementation=model_args.attn_implementation,
     )
-    # PATCH: vocab-size mismatch fix.
+    # NOTE: vocab-size mismatch fix.
     #
     # The tokenizer used everywhere in this script (`tokenizer`, loaded above
     # from the STUDENT's checkpoint) may not have the same vocab size as the
@@ -1660,7 +1662,7 @@ def main():
         f"Number of trainable parameters: {sum(p.numel() for p in student_model.parameters() if p.requires_grad):.3e}"
     )
 
-    # PATCH: optimization - skip the teacher's (redundant) feature extraction
+    # NOTE: optimization - skip the teacher's (redundant) feature extraction
     # entirely when it would produce the exact same array as the student's
     # (e.g. small+small pairings, or any case where the two checkpoints share
     # a feature extractor config). Only pairings that actually disagree (e.g.
@@ -2236,6 +2238,35 @@ def main():
         resume_step = None
 
     session_start_step = cur_step
+
+    def prefetch_iter(dataloader, num_prefetch=2):
+        it = iter(dataloader)
+        executor = ThreadPoolExecutor(
+            max_workers=1
+        )  # single worker: fetch is sequential either way
+        pending = deque()
+
+        def _next():
+            try:
+                return next(it)
+            except StopIteration:
+                return None
+
+        # prime the pipeline
+        for _ in range(num_prefetch):
+            pending.append(executor.submit(_next))
+
+        while pending:
+            batch = pending.popleft().result()
+            if batch is None:
+                executor.shutdown(wait=False)
+                return
+            pending.append(
+                executor.submit(_next)
+            )  # kick off the next fetch immediately
+            yield batch
+
+        executor.shutdown(wait=False)
 
     for epoch in range(epochs_trained, num_epochs):
         # Datasets are shuffled before publication. Preserve their stored order
